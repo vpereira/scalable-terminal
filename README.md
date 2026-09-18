@@ -1,20 +1,8 @@
 # Scalable Terminal
 
-A native desktop trading terminal for the Scalable Capital broker. Written in Rust with egui. One binary, no web view, no browser.
+A native desktop trading terminal for the Scalable Capital broker, in the spirit of Interactive Brokers' Trader Workstation. Rust, egui, one binary, no web view.
 
-## Status: early and under heavy development
-
-Read this part before you run anything.
-
-This is a young project and it changes daily. Some of it is solid: the code that reads and interprets the broker's JSON is covered by tests that run against real captured payloads. Much of the rest is not. Panels have been checked by eye on one account, on one screen size, against one small portfolio of four positions. Error paths are mostly unexercised. Whole areas have been used once and declared fine.
-
-Nobody has ever placed an order through this app. Not once. The preview half of the order flow works and is tested. The half that actually sends an order to the market has never run.
-
-So treat it as a viewing tool that happens to have a ticket attached, not as trading software you would rely on. Check anything important against the official app before you act on it. If a number here disagrees with what Scalable Capital shows you, believe Scalable Capital and please report it.
-
-## What it looks like
-
-The chart view. Watchlist across the top, candles below, account and orders on the right.
+Status: alpha. The JSON layer is pinned by tests against real payloads. The order submit path has not been exercised.
 
 ![Chart view](docs/chart.png)
 
@@ -26,44 +14,36 @@ The derivatives view, listing what is tradable on whichever instrument you last 
 
 ![Derivatives view](docs/derivatives.png)
 
-These were taken with the app's own screenshot mode, described near the end of this file. The account holder's name is replaced with a placeholder by the `--redact` flag.
+## Why
 
-## Goal
+The Scalable Capital apps are built for buying an ETF once a month. They do not show a bid and an ask at the same time, what the spread is costing you, cost basis next to a live price, or what is resting on the market next to the position it would close.
 
-The Scalable Capital web and phone apps are built for buying an ETF once a month. They are not built for trading. You cannot see a bid and an ask at the same time. You cannot see what the spread is costing you. You cannot see cost basis next to a live price. You cannot see what is resting on the market next to the position it would close.
+This puts all of it on one screen. It will never be Trader Workstation, because the data behind it is thinner, but everything Scalable does expose is here rather than three taps away.
 
-This project aims at the thing Interactive Brokers got right with Trader Workstation: one dense screen where price, position, risk and the order ticket are all visible at once, and where every number you need to make a decision is already on the screen rather than three taps away.
+## Backend
 
-It will never be a full Trader Workstation, because the data behind it is thinner. What it can do is take everything Scalable Capital actually exposes and put it in front of you properly, instead of hiding it.
+Scalable Capital has no public REST API for retail brokerage accounts. Since August 2026 it has an official agent interface, Agentic Investing, shipped as a command line tool called `sc` and as a hosted MCP server.
 
-## How the backend works
+`sc` is this terminal's entire backend. No scraping, no browser automation, no private endpoints.
 
-There is no public REST API for Scalable Capital retail brokerage accounts. There is, since August 2026, an official agent interface called Agentic Investing. It ships as a command line tool called `sc` and as a hosted MCP server.
+* The app has no HTTP client. It spawns `sc` as a child process with `--json` and parses stdout.
+* `sc` owns the session. `sc login` runs an OAuth device code flow. The app never sees credentials.
+* Responses are enveloped as `{"ok": bool, "command": string, "data": ...}`. Logical failures arrive with `ok: false` and exit code zero, so success is read from the envelope rather than the exit status.
+* Read payloads nest under `data.result`. `broker chart` is the exception and puts them directly in `data`. The unwrapper handles both.
+* All calls run on a background thread. The UI thread never blocks on a subprocess.
 
-This terminal uses the `sc` command line tool as its entire backend. It does not scrape the website, it does not drive a browser, it does not reverse engineer private endpoints. Everything it shows came out of a command Scalable Capital publishes and supports.
+Commands used: `whoami`, `broker overview`, `broker cash-breakdown`, `broker holdings`, `broker transactions`, `broker analytics`, `broker watchlist`, `broker quote`, `broker chart`, `broker search`, `broker derivatives search`, `broker trade buy`, `broker trade sell`, `broker trade cancel`.
 
-Concretely:
+Two CLI details shaped the design:
 
-* The app never talks to the network itself. It spawns `sc` as a child process, passes `--json`, and parses what comes back on standard output.
-* `sc` handles the login. You run `sc login` once in a terminal, which does an OAuth device code flow in your browser. The session lives in the CLI, not in this app. This app never sees or stores your password.
-* Every response is a JSON envelope shaped `{"ok": bool, "command": string, "data": ...}`. A logical failure such as an expired session arrives with `ok` set to false and a process exit code of zero, so failure is detected from the envelope rather than from the exit status.
-* Almost every read command nests its real payload one level deeper, under `data.result`. The one exception found so far is `broker chart`, which puts the payload directly in `data`. The unwrapping helper tolerates both.
-* All of this happens on a background thread. The user interface thread never waits on a subprocess.
-
-The commands in use are `whoami`, `broker overview`, `broker cash-breakdown`, `broker holdings`, `broker transactions`, `broker analytics`, `broker watchlist`, `broker quote`, `broker chart`, `broker search`, `broker derivatives search`, `broker trade buy`, `broker trade sell` and `broker trade cancel`.
-
-Two details about the CLI that shaped the design:
-
-* Working orders have no command of their own. There is a cancel command but no list command, and the account overview carries no order list. Resting orders are therefore read out of `broker transactions` and filtered to the ones with status PENDING.
-* Orders are deliberately two phase. The first call returns a confirmation id plus a full pre trade cost disclosure. The second call repeats the order with that confirmation id attached. The CLI publishes this as a contract and requires that the disclosure is shown to a human before the second call. The confirm dialog in this app is that contract rendered as a screen.
+* There is no command to list orders, and the account overview carries no order list. Resting orders come from `broker transactions` filtered to status PENDING.
+* Orders are two phase. Phase one returns a confirmation id and a full pre trade cost disclosure; phase two repeats the order with that id. The CLI publishes this as a contract requiring the disclosure be shown to a human in between. The confirm dialog is that contract as a screen.
 
 ## Rate limits
 
-This is the single biggest constraint on the design, and it is not documented anywhere, so it was measured.
+Undocumented, so measured. Quotes are tolerant. Charts and derivative searches are not.
 
-Quotes are tolerant. Charts and derivative searches are not.
-
-Quote polling, measured on 17 September 2026:
+Quote polling, 17 September 2026:
 
 ```
 1 instrument                160 to 230 ms
@@ -73,203 +53,126 @@ Quote polling, measured on 17 September 2026:
 27 instruments, 12 in parallel     769 ms
 ```
 
-That works out to roughly 33 ms per instrument once requests overlap. Around 50 instruments per round of a second and a half is comfortable. Going wider than 8 parallel requests buys very little, because the cost is dominated by starting a process rather than by the network. Nothing was ever refused at any width tried.
+Roughly 33 ms per instrument once requests overlap, so about 50 instruments per round of a second and a half. Past 8 parallel workers the gain is small: process spawn dominates, not the network. Nothing was refused at any width tried.
 
-Charts are the opposite. Eight chart requests in quick succession were all refused:
+Charts are the opposite. Eight in quick succession were all refused:
 
 ```
 RATE_LIMITED: backend rate limit exceeded during BrokerChart
 ```
 
-The limit cleared after 46 seconds. Derivative searches refuse in the same way with `BrokerDerivativesSearch` in the message.
+Cleared after 46 seconds. Derivative searches and the watchlist endpoint refuse the same way.
 
-How the app handles this:
+Handling:
 
-* Any refusal is treated as applying to the whole account, not just to the endpoint that tripped it. Hammering a second endpoint after tripping the first only makes things worse.
-* On a refusal all polling stops for 90 seconds. The measured recovery was 46 seconds, so the pause is deliberately longer than what was observed.
-* A countdown appears in the top bar. It keeps ticking on its own, because during a pause nothing completes and nothing would otherwise trigger a redraw.
-* A chart request made during a pause is not sent. It is queued, and it is issued for real once the pause ends.
-* Charts are cached per instrument and per timeframe. Derivative searches are cached per underlying, family and direction. Flipping between tabs and timeframes costs nothing after the first load.
-
-Practical advice: if you widen the poll interval in the top bar and the latency readout stays flat, you have room. If you start seeing the pause banner, you are asking for charts faster than the backend will serve them.
+* A refusal is treated as account wide. Tripping a second endpoint after the first only makes it worse.
+* All polling pauses for 90 seconds, with a countdown in the top bar that ticks on its own, since nothing completes during a pause to trigger a redraw.
+* Chart requests made during a pause are queued and issued when it ends.
+* Charts are cached per instrument and timeframe, derivative searches per underlying, family and direction.
 
 ## The Mac must be unlocked
 
-`sc` signs every request with a key held in the Secure Enclave, and the Secure Enclave will not sign while the machine is locked. Lock your screen and every command fails immediately:
+`sc` signs every request with a Secure Enclave key, which will not sign while the machine is locked:
 
 ```
 device_locked: The Mac is locked, so the Secure Enclave signing key cannot be
 used. Unlock the Mac and retry.
 ```
 
-Your session is not lost. Nothing needs logging in again. But nothing works until you unlock, and that has consequences worth planning around.
+The session survives. Nothing needs logging in again. But prices stop updating, and a trailing stop cannot follow the price, so it holds wherever it was last placed. Orders already resting at the broker are unaffected, since they live on the broker's side.
 
-Live prices stop updating. Any monitoring stops. Most importantly, a trailing stop cannot follow the price while the machine is locked, so it holds at wherever it was last placed. If you rely on a trail, either keep the machine awake or accept that the stop freezes when you walk away. Orders already resting at the broker are unaffected, because they live on the broker's side and do not need your machine at all.
+This arrives with the same exit code as a genuine auth failure, so it is classified separately and reports what actually needs doing.
 
-The failure arrives with the same exit code as a genuine authentication error, so the app classifies it separately and says to unlock rather than offering useless advice about logging in again.
+## Install
 
-## Install and run
-
-Do these steps in order. The terminal is only a front end, so if the CLI underneath it is not working, the terminal will show you empty panels and you will have no idea why. Prove the CLI works first.
-
-### Step 1. Turn on AI trading in your Scalable Capital account
-
-Log in to the Scalable Capital web platform. Go to Profile, then Security, then Agentic Investing. Enable it.
-
-This is the feature that lets an external program act on your account at all. It is the same switch that lets ChatGPT or Claude connect to your broker. Without it every command below fails with an authentication error, and there is nothing this app can do about that.
-
-### Step 2. Install the CLI
+Enable Agentic Investing in the Scalable Capital web platform under Profile, Security, Agentic Investing. This is the switch that lets any external program reach the account.
 
 ```
 brew tap ScalableCapital/tap
 brew trust scalablecapital/tap
 brew install scalable-cli
-```
-
-Homebrew will refuse to install from a third party tap until you trust it, which is why the middle line is there.
-
-### Step 3. Log in
-
-```
 sc login
 ```
 
-This is interactive. It opens a browser, you approve a device code, and the session is stored by the CLI. It has to be done in a real terminal. The app cannot do it for you and never sees your credentials.
+`sc login --local-read-only` blocks every write command until you log in again without the flag.
 
-If you only want to look around, with no ability to place an order at all, use this instead:
-
-```
-sc login --local-read-only
-```
-
-That blocks every write command until you log in again without the flag. It is a good way to try the terminal for the first time.
-
-### Step 4. Try the CLI by hand before starting the terminal
-
-This step is not optional if you want to save yourself confusion. Run these and confirm each one prints real data:
+Worth confirming the CLI works before starting the terminal, since the terminal is only a front end:
 
 ```
 sc whoami --json
 sc broker overview --json
 sc broker holdings --json
-sc broker watchlist --json
-sc broker quote --isin <one of your ISINs> --json
-sc broker chart --isin <one of your ISINs> --timeframe 1d --json
 ```
 
-What you are checking:
-
-* Every response starts with `"ok":true`. If it says `"ok":false` with `no_session`, go back to step 3. If it says `rate_limited`, wait a minute and try again.
-* `holdings` and `watchlist` list the things you expect to see.
-* `quote` returns a bid and an ask, not just a mid.
-
-If `sc` works and the terminal does not, the problem is this app and worth reporting. If `sc` itself is failing, the terminal cannot help you, and the fix is with the CLI or your account settings.
-
-It is also worth spending a few minutes just reading `sc --help` and `sc broker --help`. Everything this terminal can do is something the CLI can do, so knowing the CLI tells you exactly where the ceiling is.
-
-### Step 5. Run the terminal
+Then:
 
 ```
 cargo run --release
 ```
 
-## Underlying technology
+## Stack
 
-Nothing exotic is involved. The parts are:
+Rust for the binary. No runtime to install.
 
-Rust, as the language. The binary is self contained, starts instantly, and has no runtime to install.
+egui for the interface, through eframe and wgpu. Immediate mode suits a screen that is mostly dense tables changing several times a second: the table is a loop over current data, not a widget tree kept in sync. egui_plot draws the chart.
 
-egui, as the user interface. It is an immediate mode toolkit, which means the whole screen is described from scratch on every frame rather than kept as a tree of widget objects that have to be mutated and kept in sync. For a screen that is mostly dense tables of numbers changing several times a second, that model is a good fit and it keeps the code direct: the table you see on screen is a loop over the current data, not a set of update callbacks. eframe is the shell around it that opens the window, and rendering goes through wgpu to the GPU. egui_plot draws the chart.
+Plain threads and channels, no async runtime. The UI runs on the main thread, one background thread owns all input and output, and a short lived pool of eight threads fans out quote requests. The work is slow subprocess calls, not thousands of sockets, so an async runtime would add machinery for nothing.
 
-The Scalable CLI, as the entire data layer, described in the previous section. Worth repeating that this app has no HTTP client, no credentials, no API keys and no persistent storage of account data. It starts a subprocess and reads JSON.
+Seven direct dependencies: eframe, egui, egui_extras, egui_plot, serde, serde_json, image. Around 186 crates once the graphics stack is counted.
 
-serde and serde_json, for parsing those responses.
+## Screen
 
-Plain standard library threads and channels for concurrency. There is no async runtime. The user interface runs on the main thread, one background thread owns all input and output, and they talk over a channel plus a shared mutex protected state struct. When quotes are fetched, that background thread opens a short lived pool of eight more threads which pull instruments from a shared counter until the list is done. This is deliberately simple. The work is slow subprocess calls rather than thousands of sockets, so an async runtime would add machinery without buying anything.
+Top bar: session, last quote round time and instrument count, poll interval, refresh buttons, rate limit countdown, view tabs.
 
-The direct dependency list is seven crates: eframe, egui, egui_extras, egui_plot, serde, serde_json, and image, the last of which exists only for the screenshot mode described below. That pulls in around 186 crates once the graphics stack underneath egui is counted, which is what a GPU rendered window costs on any toolchain.
+Watchlist strip: your Scalable watchlist plus every position you hold, marked POS. Adding and removing changes the account, so the terminal and your phone agree. Columns are bid, ask, mid, intraday change and spread in basis points, colour coded. A marker flags quotes the broker considers stale.
 
-## Screenshot mode
+Positions appear in the strip because Scalable will not watchlist an instrument you own. The API accepts the request, answers `ok`, then reports `is_on_watchlist: false` and nothing appears. Tested across six instruments: held refused, unheld accepted. They have no remove button, since there is no watchlist entry to remove.
 
-The app can photograph itself:
+Right column: cash and buying power, positions with cost basis and unrealised profit against a live mid, working orders with cancel, trailing stops, order ticket.
 
-```
-cargo run --release -- --screenshot out.png 8 --tab chart
-```
+Main area:
 
-It opens, waits the given number of seconds so the data has arrived, writes a PNG and exits. The optional `--tab` picks the view, one of chart, derivatives, portfolio, log or raw. The optional `--select` picks the instrument, so a screenshot is reproducible rather than dependent on whichever holding happened to sort first.
-
-`--redact` replaces the account holder's name with a placeholder. It works outside screenshot mode too, so it is also useful when sharing your screen. Note that it hides the name and nothing else: balances, positions and resting orders all remain visible, so look at an image before publishing it.
-
-The screenshots at the top of this file were produced with:
-
-```
-cargo run --release -- --redact --screenshot docs/chart.png 10 --tab chart --select <isin>
-```
-
-This exists because the app cannot be brought to the foreground from a script on macOS, so an ordinary screen capture photographs whatever window happens to be in front instead. It was built to check layout changes, and it earned its place immediately by revealing that the panels were badly proportioned and that a column of numbers was wrapping vertically. It is a development tool, not a feature, but it is genuinely useful if you want to see what a change did.
-
-## What is on the screen
-
-Top bar: who is logged in, how long the last quote round took and how many instruments it covered, the poll interval, refresh buttons, the rate limit countdown when one is active, and the view tabs.
-
-Watchlist strip across the top: your real Scalable Capital watchlist, plus every position you hold, marked POS. Adding and removing changes the account, so the terminal and your phone stay in agreement.
-
-Holdings are shown there because Scalable will not let you watchlist an instrument you own. The API accepts the request and answers `ok`, but reports `is_on_watchlist: false` and the entry never appears. Tested across six instruments: everything held was refused, everything unheld was accepted. Rather than leave positions invisible in the one place you scan for prices, they are listed alongside. They have no remove button, because there is no watchlist entry to remove. Columns are bid, ask, mid, intraday change and spread in basis points. The spread is colour coded, because it is the number that decides whether a trade is worth doing and the official apps never show it. A marker flags any quote the broker itself considers stale.
-
-Right hand column: cash and buying power, positions with cost basis and unrealised profit marked against a live mid, working orders with a cancel button next to each, and the order ticket.
-
-Main area, one of five views:
-
-* Chart. Candles or a line, with the previous close drawn as a dashed baseline. Timeframes are 1d, 7d, 1m, 3m, 6m, ytd, 1y and max. Moving averages at 20, 50 and 200 days.
-* Derivatives. Every knockout, factor certificate and warrant tradable on whatever instrument you last clicked. Filter by family and by direction. Columns include leverage, strike, knockout barrier and distance to the knockout barrier, which is colour coded as a survival margin. Clicking a row makes that derivative the active instrument for the chart and the ticket.
-* Portfolio. Total, securities and cash, return per timeframe, holdings with portfolio weight and profit, allocation by product type, asset class, sector and region, diversification scores, and modelled stress scenarios against a benchmark.
-* Log. Every `sc` invocation, timed. This is how you see what the backend is actually doing and how long it takes.
+* Chart. Candles or line, previous close as a dashed baseline. Timeframes 1d, 7d, 1m, 3m, 6m, ytd, 1y, max. Moving averages at 20, 50 and 200 days.
+* Derivatives. Knockouts, factor certificates and warrants on whatever instrument you last clicked, filtered by family and direction. Leverage, strike, knockout barrier, distance to barrier, premium, expiry. Clicking a row makes that derivative the active instrument.
+* Portfolio. Totals, return per timeframe, holdings with weight and profit, allocation by product type, asset class, sector and region, diversification scores, stress scenarios against a benchmark.
+* Log. Every `sc` invocation, timed.
 * Raw. The unmodified JSON behind each endpoint.
 
-## Placing an order
+## Orders
 
-Selling sizes by shares only. There are all and half buttons, and they are computed from the shares that are genuinely free.
+Market, limit and stop. Venue overridable. No bracket or OCO, because the CLI has neither.
 
-That distinction matters. The broker reports `blocked_quantity` as zero even for a position that is entirely committed to a resting sell order. Sizing a sell from quantity minus blocked would therefore offer shares that are already on the market. This app subtracts resting sells itself, shows the free amount, and disables the all and half buttons when nothing is free.
+Preview runs phase one. The dialog shows the whole disclosure: shares, estimated volume, bid, ask, mid, spread in basis points, venue and status, entry, ongoing and exit costs, suitability, warnings, and seconds remaining on the confirmation. Submit runs phase two, and is enabled only once CONFIRM is typed, the instrument is tradable, the confirmation is unexpired, and any unsuitability warning is accepted. It disarms itself when the countdown reaches zero rather than failing at the broker.
 
-Preview runs the first phase. The dialog then shows everything the disclosure contains: share count, estimated volume, bid, ask, mid, spread in basis points, venue and its status, entry, ongoing and exit costs, suitability, any warning, and how many seconds the confirmation remains valid.
+Selling sizes by shares, with all and half buttons computed from shares that are genuinely free. The broker reports `blocked_quantity` as zero even for a position entirely committed to a resting sell, so sizing from quantity minus blocked would offer shares already on the market. Resting sells are subtracted here instead.
 
-Submit runs the second phase. It only becomes clickable when you have typed CONFIRM, the instrument is tradable, the confirmation has not expired, and any unsuitability warning has been accepted. When the validity countdown reaches zero the button disarms itself rather than letting the order fail at the broker.
-
-Order types are market, limit and stop. Venue can be overridden. There are no bracket or OCO orders, because the CLI does not offer them.
+`max_order_notional`, `allowed_isins` and `denied_isins` in the CLI's `config.toml` are enforced by the CLI, which is a better place for a hard limit than this app.
 
 ## Trailing stops
 
-The CLI has no trailing order type, no amend command, and nothing resembling OCO. So a trailing stop cannot be handed to the broker. It can only be imitated from here: watch the price, and when it rises far enough, cancel the resting stop and place a new one higher.
+The CLI has no trailing order type and no amend command, so a trail cannot be handed to the broker. It is imitated: track the high water mark, and when the resting stop falls behind, cancel it and place a new one higher.
 
-This app does the watching and the arithmetic, and then asks you before it moves anything.
+The app does the watching and the arithmetic, then asks before moving anything. Arm a trail on a position as a percentage or an absolute amount. When the stop should move, a button appears. Pressing it cancels the resting stop and previews the replacement through the usual confirm dialog.
 
-Arm a trail on a position you hold, as a percentage or as an absolute amount. From then on the app tracks the high water mark, which only ever rises, and works out where the stop should sit. When the resting stop falls meaningfully behind, a button appears offering to move it up. Until you press that button nothing happens to your orders.
+Interesting detail: the broker's own order schema carries a `trailing_stop_info` field, so the backend models trailing stops natively. The CLI exposes no way to set one.
 
-Pressing it cancels the resting stop and previews the replacement. The usual confirm dialog appears, with full costs and the validity countdown, and you complete it the same way as any other order.
+Constraints:
 
-Three things to understand before using it:
+* There is an unprotected window. Shares are committed to the resting stop, so the old order must be cancelled before a replacement can be previewed. Between the cancel and the confirmation there is no stop, and the panel says so in red while that holds.
+* It follows only while the app is running and the Mac is unlocked, in steps of the poll interval. Otherwise the stop stays where it was last placed.
+* It will not chase small moves. A replacement costs three calls and opens that window, so a ratchet is offered only once the improvement is worth a tenth of a percent.
 
-The position is unprotected in the middle. Your shares are committed to the resting stop, so the old order has to be cancelled before a replacement can even be previewed. That ordering is forced by the broker. Between the cancel and your confirmation there is no stop on the position, and the app says so in red for as long as that is true.
+The high water mark persists to `~/.config/scalable-terminal/trails.json`, since it is the only part of a trail that cannot be recovered from the broker. The resting stop and share count are read back from live account state every refresh.
 
-It only follows while the app is open, and only as finely as it polls. Close the terminal and your stop simply stays where it was last placed, still protecting you at that level, no longer tracking.
+## Data limits
 
-It will not chase small moves. A replacement costs three calls and opens that unprotected window, so a ratchet is only offered once the improvement is worth at least a tenth of a percent.
+No streaming. No websocket or server sent events in the CLI, so prices are polled, one process per instrument, eight at a time. The round time is always on screen.
 
-The high water mark is written to `~/.config/scalable-terminal/trails.json`, because it is the one piece of a trail that cannot be recovered from the broker. Everything else, the resting stop and the share count, is read back from live account state on every refresh, so an order you cancel or move elsewhere is picked up rather than quietly disagreed with.
+No market depth. Level one only.
 
-If you want a hard ceiling on order size, set `max_order_notional`, `allowed_isins` and `denied_isins` in the CLI's own `config.toml`. Those are enforced by the CLI itself, which is a better place for a risk limit than this app.
+No OHLC. The chart endpoint returns mid price ticks, so candles are built here by bucketing ticks into intervals. Open and close are the first and last tick in a bucket, high and low its extremes. Empty buckets are skipped rather than carried forward, so a gap stays a gap instead of becoming a flat bar that never traded.
 
-## What the data cannot do
-
-No streaming. The CLI has no websocket and no server sent events, so prices are polled. One process per instrument, eight at a time. The round time is always on screen so you can see the cost rather than guess at it.
-
-No market depth. Level one only, a single bid and a single ask.
-
-No OHLC. The chart endpoint returns mid price ticks and nothing else, so the candles in this app are built here, by bucketing those ticks into time intervals. Open and close are the first and last tick in a bucket, high and low are its extremes. Empty buckets are skipped rather than carried forward, so a gap in the data stays visibly a gap instead of turning into a flat bar that never traded. They are real candles derived from real ticks, but they are derived, and the chart says so.
-
-The chart endpoint also downsamples according to how long a span you ask for, and never returns more than about 190 points:
+The chart endpoint downsamples by span and never returns more than about 190 points:
 
 ```
 timeframe   points   typical gap   span
@@ -283,7 +186,7 @@ ytd            182         1 day    257.9 days
 max            107        30 days   3212.9 days
 ```
 
-This is why the moving averages are measured in calendar days rather than in bars. A twenty bar average would mean three hours on the 1d view and fifty years on the max view, and a two hundred bar window would not exist on any timeframe at all. Measured in days, 20, 50 and 200 all mean what a trader expects them to mean. A window longer than the loaded data is refused rather than drawn short, and the button explains why when you hover it. All three averages are available on ytd, 1y and max. None of them are available on 1d, which is correct, because a single session does not contain a twenty day average.
+Hence moving averages in calendar days rather than bars. A twenty bar average would be three hours on 1d and fifty years on max, and a two hundred bar window would not exist on any timeframe. In days, 20, 50 and 200 mean what they normally mean. A window longer than the loaded data is disabled rather than drawn short. All three are available on ytd, 1y and max; none on 1d, which is correct for a single session.
 
 ## Tests
 
@@ -291,38 +194,32 @@ This is why the moving averages are measured in calendar days rather than in bar
 cargo test
 ```
 
-Twenty five tests. They run the extractors against real payloads captured from a live account, with account identifiers removed, stored in `tests/fixtures`.
+Thirty two tests, running the extractors against real payloads captured from a live account with identifiers removed, in `tests/fixtures`. The JSON shapes are undocumented and can change, so a renamed field fails a test instead of quietly blanking a panel.
 
-The point of them is that the JSON shapes are undocumented and can change without warning. If a future CLI release renames a field, a test fails instead of a panel quietly going blank.
+They assert behaviour, not just field names. Securities plus cash reconcile to the reported total. Chart timestamps increase. Allocation weights sum to one. Candle aggregation satisfies the open, high, low, close relationships and accounts for every tick exactly once. A moving average matches a mean computed directly. An expired confirmation disarms submit. Free to sell quantity subtracts resting sells. `device_locked` is not classified as an auth failure. A watchlist refusal hidden inside an `ok` response is detected.
 
-They check more than field names. Securities plus cash must reconcile to the reported total. Chart timestamps must increase. Allocation weights must sum to one. Candle aggregation must satisfy the usual open, high, low, close relationships and must account for every tick exactly once. A moving average must match a mean computed directly. An expired confirmation must disarm the submit button. Free to sell quantity must subtract resting sells.
+To refresh fixtures after a CLI upgrade, rerun each `sc broker <command> --json` into `tests/fixtures` and strip the account and portfolio identifiers.
 
-To refresh the fixtures after upgrading the CLI, run each `sc broker <command> --json` again into `tests/fixtures` and strip the account and portfolio identifiers.
+## Screenshot mode
 
-## Layout of the code
+```
+cargo run --release -- --screenshot out.png 8 --tab chart --select <isin>
+```
 
-* `src/sc.rs` wraps the command line tool. Envelope parsing, exit codes, rate limit classification, tolerant path lookup.
-* `src/model.rs` turns payloads into typed values, and holds the derived logic: candle aggregation, moving averages, free to sell quantity.
-* `src/worker.rs` is the background thread. Quote fan out, chart and derivative caches, the rate limit pause, and the two phase order flow.
+Renders, waits the given seconds for data, writes a PNG, exits. `--tab` picks the view, `--select` the instrument. `--redact` replaces the account holder's name with a placeholder and works outside screenshot mode too. It hides the name only; balances, positions and orders stay visible.
+
+This exists because the app cannot be brought to the foreground from a script on macOS, so an ordinary screen capture photographs whatever is in front instead.
+
+## Code
+
+* `src/sc.rs` wraps the CLI. Envelope parsing, exit codes, rate limit and device lock classification, tolerant path lookup.
+* `src/model.rs` types the payloads and holds derived logic: candle aggregation, moving averages, free to sell quantity, trailing stop arithmetic.
+* `src/worker.rs` is the background thread. Quote fan out, caches, rate limit pause, two phase order flow.
 * `src/app.rs` is the interface.
-* `src/tests.rs` holds the tests described above.
+* `src/tests.rs` is the suite above.
 
-## Where it stands
+## Status
 
-What has genuinely been verified against a live account:
+Verified against a live account: every read shape, quote polling and its timings, rate limit behaviour and recovery, the first phase of the order flow, candle aggregation and moving averages.
 
-* Every read shape. All the JSON parsing was written against captured real responses, not guessed, and the tests hold it in place.
-* Quote polling and its timings, which is where the numbers earlier in this file come from.
-* The rate limit behaviour, including how long a refusal actually lasts.
-* The first phase of the order flow, which returns the disclosure and a confirmation id.
-* The candle aggregation and the moving averages, by calculation rather than by eye.
-
-What has not:
-
-* Placing an order. The second phase has never run.
-* Cancelling an order.
-* Adding and removing watchlist entries beyond a couple of tries.
-* Anything on an account that looks different from the one it was built against. Four positions, one currency, no crypto, no savings plans, no derivatives held.
-* Error handling in general. Sessions expiring mid use, instruments that stop trading, malformed responses. These are handled in code and almost none of it has been provoked for real.
-
-Expect rough edges and expect things to move. If something looks wrong, it may well be wrong.
+Not yet exercised: placing an order, cancelling an order, accounts unlike the one it was built against, and most error paths.
