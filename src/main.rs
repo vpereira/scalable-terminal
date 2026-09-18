@@ -28,7 +28,15 @@ fn main() -> eframe::Result<()> {
             .position(|a| a == "--tab")
             .and_then(|i| argv.get(i + 1))
             .cloned(),
+        select: argv
+            .iter()
+            .position(|a| a == "--select")
+            .and_then(|i| argv.get(i + 1))
+            .cloned(),
     });
+
+    // `--redact` hides the account holder's name, for screenshots and sharing.
+    let redact = argv.iter().any(|a| a == "--redact");
 
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -44,6 +52,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Scalable Terminal",
         opts,
-        Box::new(move |cc| Ok(Box::new(app::App::with_shot(cc, shot)))),
+        Box::new(move |cc| Ok(Box::new(app::App::with_shot(cc, shot, redact)))),
     )
 }

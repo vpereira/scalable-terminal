@@ -12,6 +12,22 @@ Nobody has ever placed an order through this app. Not once. The preview half of 
 
 So treat it as a viewing tool that happens to have a ticket attached, not as trading software you would rely on. Check anything important against the official app before you act on it. If a number here disagrees with what Scalable Capital shows you, believe Scalable Capital and please report it.
 
+## What it looks like
+
+The chart view. Watchlist across the top, candles below, account and orders on the right.
+
+![Chart view](docs/chart.png)
+
+The portfolio view, with allocation, diversification scores and stress scenarios.
+
+![Portfolio view](docs/portfolio.png)
+
+The derivatives view, listing what is tradable on whichever instrument you last clicked.
+
+![Derivatives view](docs/derivatives.png)
+
+These were taken with the app's own screenshot mode, described near the end of this file. The account holder's name is replaced with a placeholder by the `--redact` flag.
+
 ## Goal
 
 The Scalable Capital web and phone apps are built for buying an ETF once a month. They are not built for trading. You cannot see a bid and an ask at the same time. You cannot see what the spread is costing you. You cannot see cost basis next to a live price. You cannot see what is resting on the market next to the position it would close.
@@ -166,7 +182,15 @@ The app can photograph itself:
 cargo run --release -- --screenshot out.png 8 --tab chart
 ```
 
-It opens, waits the given number of seconds so the data has arrived, writes a PNG and exits. The optional `--tab` picks the view, one of chart, derivatives, portfolio, log or raw.
+It opens, waits the given number of seconds so the data has arrived, writes a PNG and exits. The optional `--tab` picks the view, one of chart, derivatives, portfolio, log or raw. The optional `--select` picks the instrument, so a screenshot is reproducible rather than dependent on whichever holding happened to sort first.
+
+`--redact` replaces the account holder's name with a placeholder. It works outside screenshot mode too, so it is also useful when sharing your screen. Note that it hides the name and nothing else: balances, positions and resting orders all remain visible, so look at an image before publishing it.
+
+The screenshots at the top of this file were produced with:
+
+```
+cargo run --release -- --redact --screenshot docs/chart.png 10 --tab chart --select <isin>
+```
 
 This exists because the app cannot be brought to the foreground from a script on macOS, so an ordinary screen capture photographs whatever window happens to be in front instead. It was built to check layout changes, and it earned its place immediately by revealing that the panels were badly proportioned and that a column of numbers was wrapping vertically. It is a development tool, not a feature, but it is genuinely useful if you want to see what a change did.
 

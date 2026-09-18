@@ -36,11 +36,15 @@ pub struct Shot {
     /// Delay before capturing, so the data has actually arrived.
     pub warmup_secs: f32,
     pub tab: Option<String>,
+    /// Instrument to select before capturing, so a screenshot is reproducible
+    /// rather than dependent on whichever holding happened to sort first.
+    pub select: Option<String>,
 }
 
 pub struct App {
     io: Handle,
     shot: Option<Shot>,
+    redact: bool,
     shot_started: Option<std::time::Instant>,
     shot_sent: bool,
     poll: Arc<Mutex<Duration>>,
@@ -73,7 +77,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn with_shot(cc: &eframe::CreationContext<'_>, shot: Option<Shot>) -> Self {
+    pub fn with_shot(cc: &eframe::CreationContext<'_>, shot: Option<Shot>, redact: bool) -> Self {
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         cc.egui_ctx.all_styles_mut(|style| {
             style.spacing.item_spacing = egui::vec2(6.0, 4.0);
@@ -98,6 +102,7 @@ impl App {
         App {
             io,
             shot,
+            redact,
             shot_started: None,
             shot_sent: false,
             poll,
@@ -194,6 +199,10 @@ impl App {
     /// panel that reads as "unimplemented".
     fn autoselect(&mut self) {
         if self.selected.is_some() {
+            return;
+        }
+        if let Some(isin) = self.shot.as_ref().and_then(|s| s.select.clone()) {
+            self.select(isin);
             return;
         }
         let first = {
@@ -301,7 +310,13 @@ impl App {
                 match (&s.session, &s.session_error) {
                     (Some(who), _) => {
                         ui.label(RichText::new("●").color(GREEN));
-                        ui.label(RichText::new(who).monospace());
+                        // The account holder's name is the one piece of the
+                        // screen that identifies a person, so it can be hidden
+                        // for screenshots and screen sharing.
+                        ui.label(
+                            RichText::new(if self.redact { "account holder" } else { who.as_str() })
+                                .monospace(),
+                        );
                     }
                     (None, Some(err)) => {
                         ui.label(RichText::new("●").color(RED));
