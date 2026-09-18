@@ -399,9 +399,14 @@ impl App {
             .min_size(120.0)
             .max_size(600.0)
             .show(ui, |ui| {
-            let (watchlist, quotes, wl_error) = {
+            let (watchlist, holdings, quotes, wl_error) = {
                 let s = self.io.state.lock().unwrap();
-                (s.watchlist.clone(), s.quotes.clone(), s.watchlist_error.clone())
+                (
+                    s.watchlist.clone(),
+                    s.holdings.clone(),
+                    s.quotes.clone(),
+                    s.watchlist_error.clone(),
+                )
             };
 
             ui.horizontal(|ui| {
@@ -456,9 +461,27 @@ impl App {
                 });
             }
 
-            let rows: Vec<Quote> = watchlist
+            // Scalable refuses to watchlist anything you hold, so a position can
+            // never appear here on its own. Show holdings alongside the watched
+            // instruments, flagged, so one strip covers everything being tracked.
+            let mut ordered: Vec<(String, bool)> =
+                watchlist.iter().map(|i| (i.clone(), false)).collect();
+            for h in &holdings {
+                if !h.isin.is_empty() && !watchlist.contains(&h.isin) {
+                    ordered.push((h.isin.clone(), true));
+                }
+            }
+            let rows: Vec<(Quote, bool)> = ordered
                 .iter()
-                .map(|i| quotes.get(i).cloned().unwrap_or(Quote { isin: i.clone(), ..Default::default() }))
+                .map(|(i, held)| {
+                    (
+                        quotes
+                            .get(i)
+                            .cloned()
+                            .unwrap_or(Quote { isin: i.clone(), ..Default::default() }),
+                        *held,
+                    )
+                })
                 .collect();
 
             let mut remove: Option<String> = None;
@@ -485,7 +508,8 @@ impl App {
                 })
                 .body(|body| {
                     body.rows(20.0, rows.len(), |mut row| {
-                        let q = &rows[row.index()];
+                        let (q, held) = &rows[row.index()];
+                        let held = *held;
                         let is_sel = self.selected.as_deref() == Some(q.isin.as_str());
 
                         row.col(|ui| {
@@ -505,8 +529,22 @@ impl App {
                             }
                         });
                         row.col(|ui| {
-                            ui.label(RichText::new(if q.name.is_empty() { "—" } else { &q.name }).color(DIM))
+                            ui.horizontal(|ui| {
+                                if held {
+                                    ui.label(
+                                        RichText::new("POS")
+                                            .color(BLUE)
+                                            .small()
+                                            .strong(),
+                                    )
+                                    .on_hover_text("a position you hold; Scalable will not watchlist it");
+                                }
+                                ui.label(
+                                    RichText::new(if q.name.is_empty() { "—" } else { &q.name })
+                                        .color(DIM),
+                                )
                                 .on_hover_text(&q.security_type);
+                            });
                         });
                         row.col(|ui| {
                             ui.label(RichText::new(num(q.bid, 4)).monospace().color(RED));
@@ -537,7 +575,9 @@ impl App {
                                 .on_hover_text(format!("absolute spread {}", num(q.spread_abs(), 4)));
                         });
                         row.col(|ui| {
-                            if ui.small_button("x").clicked() {
+                            // A holding is not a watchlist entry, so there is
+                            // nothing here to remove.
+                            if !held && ui.small_button("x").clicked() {
                                 remove = Some(q.isin.clone());
                             }
                         });

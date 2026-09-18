@@ -213,7 +213,9 @@ This exists because the app cannot be brought to the foreground from a script on
 
 Top bar: who is logged in, how long the last quote round took and how many instruments it covered, the poll interval, refresh buttons, the rate limit countdown when one is active, and the view tabs.
 
-Watchlist strip across the top: this is your real Scalable Capital watchlist. Adding and removing here changes the account, so the terminal and your phone stay in agreement. Columns are bid, ask, mid, intraday change and spread in basis points. The spread is colour coded, because it is the number that decides whether a trade is worth doing and the official apps never show it. A marker flags any quote the broker itself considers stale.
+Watchlist strip across the top: your real Scalable Capital watchlist, plus every position you hold, marked POS. Adding and removing changes the account, so the terminal and your phone stay in agreement.
+
+Holdings are shown there because Scalable will not let you watchlist an instrument you own. The API accepts the request and answers `ok`, but reports `is_on_watchlist: false` and the entry never appears. Tested across six instruments: everything held was refused, everything unheld was accepted. Rather than leave positions invisible in the one place you scan for prices, they are listed alongside. They have no remove button, because there is no watchlist entry to remove. Columns are bid, ask, mid, intraday change and spread in basis points. The spread is colour coded, because it is the number that decides whether a trade is worth doing and the official apps never show it. A marker flags any quote the broker itself considers stale.
 
 Right hand column: cash and buying power, positions with cost basis and unrealised profit marked against a live mid, working orders with a cancel button next to each, and the order ticket.
 
