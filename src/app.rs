@@ -84,7 +84,7 @@ impl App {
                 "raw" => Tab::Raw,
                 _ => Tab::Portfolio,
             })
-            .unwrap_or(Tab::Portfolio);
+            .unwrap_or(Tab::Chart);
 
         App {
             io,
@@ -269,8 +269,8 @@ impl eframe::App for App {
         }
         self.autoselect();
         self.top_bar(ui);
-        self.left_panel(ui);
         self.right_panel(ui);
+        self.watchlist_panel(ui);
         self.central(ui);
         self.preview_modal(&ctx);
     }
@@ -341,15 +341,20 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.selectable_value(&mut self.tab, Tab::Raw, "Raw");
                     ui.selectable_value(&mut self.tab, Tab::Log, "Log");
-                    ui.selectable_value(&mut self.tab, Tab::Chart, "Chart");
                     ui.selectable_value(&mut self.tab, Tab::Portfolio, "Portfolio");
+                    ui.selectable_value(&mut self.tab, Tab::Chart, "Chart");
                 });
             });
         });
     }
 
-    fn left_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("watchlist").resizable(true).default_size(470.0).max_size(900.0).show(ui, |ui| {
+    fn watchlist_panel(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("watchlist")
+            .resizable(true)
+            .default_size(250.0)
+            .min_size(120.0)
+            .max_size(600.0)
+            .show(ui, |ui| {
             let (watchlist, quotes) = {
                 let s = self.io.state.lock().unwrap();
                 (s.watchlist.clone(), s.quotes.clone())
@@ -378,6 +383,31 @@ impl App {
                 }
             });
             ui.separator();
+
+            let results = { self.io.state.lock().unwrap().search_results.clone() };
+            if !results.is_empty() {
+                ui.separator();
+                ui.label(RichText::new("Search results").strong());
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    for r in results.iter().take(50) {
+                        let isin = crate::sc::str_at(r, &["isin"]).unwrap_or_default();
+                        let name = crate::sc::str_at(r, &["name"]).unwrap_or_default();
+                        let mid = crate::sc::f64_at(r, &["quote_mid_price"]);
+                        let stype = crate::sc::str_at(r, &["security_type"]).unwrap_or_default();
+                        ui.horizontal(|ui| {
+                            if ui.small_button("+").clicked() && !isin.is_empty() {
+                                let _ = self.io.tx.send(Cmd::WatchlistAdd(isin.clone()));
+                            }
+                            if ui.selectable_label(false, RichText::new(&isin).monospace()).clicked() {
+                                self.select(isin.clone());
+                            }
+                            ui.label(RichText::new(num(mid, 4)).monospace());
+                            ui.label(RichText::new(&stype).color(BLUE).small());
+                            ui.label(RichText::new(&name).color(DIM));
+                        });
+                    }
+                });
+            }
 
             let rows: Vec<Quote> = watchlist
                 .iter()
@@ -474,30 +504,6 @@ impl App {
                 let _ = self.io.tx.send(Cmd::WatchlistRemove(r));
             }
 
-            let results = { self.io.state.lock().unwrap().search_results.clone() };
-            if !results.is_empty() {
-                ui.separator();
-                ui.label(RichText::new("Search results").strong());
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    for r in results.iter().take(50) {
-                        let isin = crate::sc::str_at(r, &["isin"]).unwrap_or_default();
-                        let name = crate::sc::str_at(r, &["name"]).unwrap_or_default();
-                        let mid = crate::sc::f64_at(r, &["quote_mid_price"]);
-                        let stype = crate::sc::str_at(r, &["security_type"]).unwrap_or_default();
-                        ui.horizontal(|ui| {
-                            if ui.small_button("+").clicked() && !isin.is_empty() {
-                                let _ = self.io.tx.send(Cmd::WatchlistAdd(isin.clone()));
-                            }
-                            if ui.selectable_label(false, RichText::new(&isin).monospace()).clicked() {
-                                self.select(isin.clone());
-                            }
-                            ui.label(RichText::new(num(mid, 4)).monospace());
-                            ui.label(RichText::new(&stype).color(BLUE).small());
-                            ui.label(RichText::new(&name).color(DIM));
-                        });
-                    }
-                });
-            }
         });
     }
 
