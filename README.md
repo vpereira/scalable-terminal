@@ -1,8 +1,8 @@
 # Scalable Terminal
 
-A native desktop trading terminal for the Scalable Capital broker, in the spirit of Interactive Brokers' Trader Workstation. Rust, egui, one binary, no web view.
+A native desktop trading terminal for the Scalable Capital broker, in the spirit of Interactive Brokers' Trader Workstation.
 
-Status: alpha. The JSON layer is pinned by tests against real payloads. The order submit path has not been exercised.
+Status: alpha.
 
 ![Chart view](docs/chart.png)
 
@@ -31,6 +31,7 @@ Scalable Capital has no public REST API for retail brokerage accounts. Since Aug
 * Responses are enveloped as `{"ok": bool, "command": string, "data": ...}`. Logical failures arrive with `ok: false` and exit code zero, so success is read from the envelope rather than the exit status.
 * Read payloads nest under `data.result`. `broker chart` is the exception and puts them directly in `data`. The unwrapper handles both.
 * All calls run on a background thread. The UI thread never blocks on a subprocess.
+* Requests are signed by the Secure Enclave, so everything fails with `device_locked` while the Mac is locked. That arrives with the same exit code as a genuine auth failure, so it is classified separately rather than sending you to log in again for no reason.
 
 Commands used: `whoami`, `broker overview`, `broker cash-breakdown`, `broker holdings`, `broker transactions`, `broker analytics`, `broker watchlist`, `broker quote`, `broker chart`, `broker search`, `broker derivatives search`, `broker trade buy`, `broker trade sell`, `broker trade cancel`.
 
@@ -69,19 +70,6 @@ Handling:
 * All polling pauses for 90 seconds, with a countdown in the top bar that ticks on its own, since nothing completes during a pause to trigger a redraw.
 * Chart requests made during a pause are queued and issued when it ends.
 * Charts are cached per instrument and timeframe, derivative searches per underlying, family and direction.
-
-## The Mac must be unlocked
-
-`sc` signs every request with a Secure Enclave key, which will not sign while the machine is locked:
-
-```
-device_locked: The Mac is locked, so the Secure Enclave signing key cannot be
-used. Unlock the Mac and retry.
-```
-
-The session survives. Nothing needs logging in again. But prices stop updating, and a trailing stop cannot follow the price, so it holds wherever it was last placed. Orders already resting at the broker are unaffected, since they live on the broker's side.
-
-This arrives with the same exit code as a genuine auth failure, so it is classified separately and reports what actually needs doing.
 
 ## Install
 
@@ -220,6 +208,6 @@ This exists because the app cannot be brought to the foreground from a script on
 
 ## Status
 
-Verified against a live account: every read shape, quote polling and its timings, rate limit behaviour and recovery, the first phase of the order flow, candle aggregation and moving averages.
+Verified against a live account: every read shape, quote polling and its timings, rate limit behaviour and recovery, candle aggregation and moving averages, and both phases of the order flow. A limit buy has been placed through the ticket and rested correctly at the broker.
 
-Not yet exercised: placing an order, cancelling an order, accounts unlike the one it was built against, and most error paths.
+Not yet exercised: cancelling an order, stop and market orders, the trailing stop ratchet, accounts unlike the one it was built against, and most error paths.
