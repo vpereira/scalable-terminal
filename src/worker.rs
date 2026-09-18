@@ -133,6 +133,7 @@ pub struct Shared {
     /// one. The position is unprotected for this whole window.
     pub trail_gap: Option<String>,
     pub trail_error: Option<String>,
+    pub watchlist_error: Option<String>,
     /// Set when the backend rate-limits us. All polling pauses until it passes.
     pub backoff_until: Option<Instant>,
     /// A chart request refused during backoff, re-issued once it lapses.
@@ -296,7 +297,30 @@ fn handle(state: &Arc<Mutex<Shared>>, cmd: Cmd) {
         }
         Cmd::WatchlistAdd(isin) => {
             let call = sc::run(&["broker", "watchlist", "add", "--isin", &isin]);
+            // The broker answers `ok: true` even when it declines to add, and
+            // reports the real outcome in `is_on_watchlist`. It refuses any
+            // instrument already held. Without this check the add looks like it
+            // worked and the row simply never appears.
+            let refused = match &call.data {
+                Ok(v) => {
+                    sc::pick(sc::result(v), &["is_on_watchlist"]).and_then(Value::as_bool)
+                        == Some(false)
+                }
+                Err(_) => false,
+            };
             log_call(state, "watchlist.add", &call, &isin);
+            if refused {
+                let mut s = state.lock().unwrap();
+                let held = s.holdings.iter().any(|h| h.isin == isin);
+                s.watchlist_error = Some(if held {
+                    format!("{isin} is a position you hold; Scalable will not watchlist it. It is in Positions.")
+                } else {
+                    format!("{isin} was declined by the broker")
+                });
+                s.push_log("watchlist.add", 0, false, format!("{isin} declined"));
+            } else {
+                state.lock().unwrap().watchlist_error = None;
+            }
             refresh_watchlist(state);
             refresh_quotes(state, &[isin]);
         }

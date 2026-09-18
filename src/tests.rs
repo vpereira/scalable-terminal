@@ -686,3 +686,20 @@ fn device_locked_is_not_an_auth_failure() {
     assert_ne!(ScErrorKind::DeviceLocked, ScErrorKind::RateLimited);
     assert_ne!(ScErrorKind::DeviceLocked, ScErrorKind::Generic);
 }
+
+/// `watchlist add` answers `ok: true` even when the broker declines, and reports
+/// the real outcome in `is_on_watchlist`. It refuses anything already held.
+/// Trusting the envelope alone makes a failed add look like a success.
+#[test]
+fn watchlist_add_reports_refusal_inside_a_success_envelope() {
+    let declined = r#"{"ok":true,"command":"broker.watchlist.add","data":{"result":{"action":"add","is_on_watchlist":false,"isin":"JP3228600007"}}}"#;
+    let accepted = r#"{"ok":true,"command":"broker.watchlist.add","data":{"result":{"action":"add","is_on_watchlist":true,"isin":"US67066G1040"}}}"#;
+
+    for (raw, expected) in [(declined, false), (accepted, true)] {
+        let v: Value = serde_json::from_str(raw).unwrap();
+        // The envelope says success in both cases.
+        assert_eq!(v["ok"], Value::Bool(true));
+        let on = sc::pick(sc::result(&v["data"]), &["is_on_watchlist"]).and_then(Value::as_bool);
+        assert_eq!(on, Some(expected));
+    }
+}

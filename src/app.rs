@@ -399,9 +399,9 @@ impl App {
             .min_size(120.0)
             .max_size(600.0)
             .show(ui, |ui| {
-            let (watchlist, quotes) = {
+            let (watchlist, quotes, wl_error) = {
                 let s = self.io.state.lock().unwrap();
-                (s.watchlist.clone(), s.quotes.clone())
+                (s.watchlist.clone(), s.quotes.clone(), s.watchlist_error.clone())
             };
 
             ui.horizontal(|ui| {
@@ -426,6 +426,9 @@ impl App {
                     let _ = self.io.tx.send(Cmd::Search(self.search_query.trim().to_string()));
                 }
             });
+            if let Some(e) = &wl_error {
+                ui.label(RichText::new(e).color(AMBER));
+            }
             ui.separator();
 
             let results = { self.io.state.lock().unwrap().search_results.clone() };
