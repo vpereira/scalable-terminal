@@ -1,4 +1,5 @@
 use crate::model::*;
+use crate::shortcuts::{self, Act};
 use crate::worker::{self, Cmd, Handle, TradeIntent, TIMEFRAMES};
 use egui::{Color32, RichText};
 use egui_extras::{Column, TableBuilder};
@@ -49,6 +50,7 @@ pub struct App {
     shot_sent: bool,
     poll: Arc<Mutex<Duration>>,
     poll_secs: f32,
+    resume_secs: f32,
     selected: Option<String>,
     new_isin: String,
     search_query: String,
@@ -64,6 +66,11 @@ pub struct App {
     deriv_underlying: Option<String>,
     trail_distance: f64,
     trail_percent: bool,
+    show_help: bool,
+    /// Set when a shortcut asks for a text field; consumed on the next frame.
+    focus_search: bool,
+    focus_add: bool,
+    price_step: usize,
     side: Side,
     order_type: OrderType,
     size_by_shares: bool,
@@ -87,6 +94,7 @@ impl App {
         let io = worker::spawn(cc.egui_ctx.clone(), poll.clone());
         let _ = io.tx.send(Cmd::RefreshAll);
 
+        let help_on_start = shot.as_ref().and_then(|s| s.tab.as_deref()) == Some("help");
         let tab = shot
             .as_ref()
             .and_then(|s| s.tab.as_deref())
@@ -107,6 +115,7 @@ impl App {
             shot_sent: false,
             poll,
             poll_secs: 10.0,
+            resume_secs: 10.0,
             selected: None,
             new_isin: String::new(),
             search_query: String::new(),
@@ -120,6 +129,10 @@ impl App {
             deriv_underlying: None,
             trail_distance: 3.0,
             trail_percent: true,
+            show_help: help_on_start,
+            focus_search: false,
+            focus_add: false,
+            price_step: 0,
             side: Side::Buy,
             order_type: OrderType::Limit,
             size_by_shares: false,
@@ -285,6 +298,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.drive_screenshot(&ctx);
+        self.handle_shortcuts(&ctx);
         // Nothing completes during a backoff, so nothing would request a repaint
         // and the countdown would sit frozen until the mouse moved.
         if self.io.state.lock().unwrap().backoff_secs_left().is_some() {
@@ -296,10 +310,222 @@ impl eframe::App for App {
         self.watchlist_panel(ui);
         self.central(ui);
         self.preview_modal(&ctx);
+        self.help_window(&ctx);
     }
 }
 
 impl App {
+
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // Escape is the one key that must work while a field has focus.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.show_help {
+                self.show_help = false;
+            } else {
+                ctx.memory_mut(|m| m.stop_text_input());
+            }
+        }
+
+        let Some(act) = shortcuts::pressed(ctx) else {
+            return;
+        };
+
+        match act {
+            Act::Help => self.show_help = !self.show_help,
+            Act::ViewChart => self.tab = Tab::Chart,
+            Act::ViewDerivatives => self.tab = Tab::Derivatives,
+            Act::ViewPortfolio => self.tab = Tab::Portfolio,
+            Act::ViewLog => self.tab = Tab::Log,
+            Act::ViewRaw => self.tab = Tab::Raw,
+
+            Act::PrevInstrument => self.step_instrument(-1),
+            Act::NextInstrument => self.step_instrument(1),
+            Act::FocusSearch => self.focus_search = true,
+            Act::FocusAdd => self.focus_add = true,
+
+            Act::Refresh => {
+                let _ = self.io.tx.send(Cmd::RefreshAll);
+            }
+            Act::RefreshQuotes => {
+                let _ = self.io.tx.send(Cmd::RefreshQuotes);
+            }
+            Act::TogglePause => {
+                // Remember the old cadence so Space toggles rather than resets.
+                if self.poll_secs > 0.0 {
+                    self.resume_secs = self.poll_secs;
+                    self.poll_secs = 0.0;
+                } else {
+                    self.poll_secs = self.resume_secs;
+                }
+                *self.poll.lock().unwrap() = Duration::from_secs_f32(self.poll_secs);
+            }
+
+            Act::PrevTimeframe => self.step_timeframe(-1),
+            Act::NextTimeframe => self.step_timeframe(1),
+            Act::ToggleCandles => self.candles = !self.candles,
+            Act::Sma20 => self.sma[0] = !self.sma[0],
+            Act::Sma50 => self.sma[1] = !self.sma[1],
+            Act::Sma200 => self.sma[2] = !self.sma[2],
+            Act::ResetZoom => {
+                ctx.memory_mut(|m| m.data.remove::<egui_plot::PlotMemory>("px".into()));
+            }
+
+            Act::SideBuy => self.side = Side::Buy,
+            Act::SideSell => self.side = Side::Sell,
+            Act::TypeMarket => self.order_type = OrderType::Market,
+            Act::TypeLimit => self.order_type = OrderType::Limit,
+            Act::TypeStop => self.order_type = OrderType::Stop,
+            Act::ToggleSizeMode => self.size_by_shares = !self.size_by_shares,
+            Act::CyclePrice => self.cycle_price(),
+            Act::Preview => {
+                // Phase one only. Placing an order still needs the dialog.
+                if self.selected.is_some() {
+                    self.confirm_typed.clear();
+                    self.accept_unsuitable = false;
+                    let _ = self.io.tx.send(Cmd::PreviewTrade(self.intent()));
+                }
+            }
+
+            Act::CancelOrder => {
+                let id = {
+                    let s = self.io.state.lock().unwrap();
+                    self.selected.as_ref().and_then(|isin| {
+                        s.orders.iter().find(|o| &o.isin == isin).map(|o| o.id.clone())
+                    })
+                };
+                if let Some(id) = id {
+                    let _ = self.io.tx.send(Cmd::CancelOrder(id));
+                }
+            }
+            Act::ArmTrail => {
+                if let Some(isin) = self.selected.clone() {
+                    let held = {
+                        let s = self.io.state.lock().unwrap();
+                        s.holdings.iter().any(|h| h.isin == isin && h.quantity > 0.0)
+                    };
+                    if held {
+                        let distance = if self.trail_percent {
+                            self.trail_distance / 100.0
+                        } else {
+                            self.trail_distance
+                        };
+                        let _ = self.io.tx.send(Cmd::ArmTrail {
+                            isin,
+                            distance,
+                            percent: self.trail_percent,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Walk the strip, which is the watchlist followed by any held positions.
+    fn step_instrument(&mut self, delta: isize) {
+        let rows: Vec<String> = {
+            let s = self.io.state.lock().unwrap();
+            let mut v = s.watchlist.clone();
+            for h in &s.holdings {
+                if !h.isin.is_empty() && !v.contains(&h.isin) {
+                    v.push(h.isin.clone());
+                }
+            }
+            v
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let cur = self
+            .selected
+            .as_ref()
+            .and_then(|s| rows.iter().position(|r| r == s))
+            .map(|i| i as isize)
+            .unwrap_or(-1);
+        let next = (cur + delta).rem_euclid(rows.len() as isize) as usize;
+        self.select(rows[next].clone());
+    }
+
+    fn step_timeframe(&mut self, delta: isize) {
+        let cur = TIMEFRAMES
+            .iter()
+            .position(|t| *t == self.timeframe)
+            .unwrap_or(0) as isize;
+        let next = (cur + delta).rem_euclid(TIMEFRAMES.len() as isize) as usize;
+        self.timeframe = TIMEFRAMES[next].to_string();
+        if let Some(isin) = self.selected.clone() {
+            self.load_chart(isin, false);
+        }
+    }
+
+    /// Step the limit price through bid, mid and ask.
+    fn cycle_price(&mut self) {
+        let Some(isin) = self.selected.clone() else {
+            return;
+        };
+        let q = { self.io.state.lock().unwrap().quotes.get(&isin).cloned() };
+        let Some(q) = q else { return };
+        self.price_step = (self.price_step + 1) % 3;
+        let p = match self.price_step {
+            0 => q.bid,
+            1 => q.mid,
+            _ => q.ask,
+        };
+        if let Some(p) = p {
+            self.order_type = OrderType::Limit;
+            self.limit_price = p;
+        }
+    }
+
+    fn help_window(&mut self, ctx: &egui::Context) {
+        if !self.show_help {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Keyboard shortcuts")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
+                    for group in shortcuts::GROUPS {
+                        ui.label(RichText::new(*group).strong().color(BLUE));
+                        egui::Grid::new(group)
+                            .num_columns(2)
+                            .spacing([18.0, 3.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for b in shortcuts::BINDINGS.iter().filter(|b| b.group == *group) {
+                                    ui.label(RichText::new(b.shown).monospace().strong());
+                                    ui.label(RichText::new(b.label).color(DIM));
+                                    ui.end_row();
+                                }
+                            });
+                        ui.add_space(8.0);
+                    }
+
+                    ui.separator();
+                    ui.label(RichText::new("Deliberately unbound").strong().color(AMBER));
+                    for (what, why) in shortcuts::UNBOUND {
+                        ui.label(RichText::new(*what).monospace());
+                        ui.label(RichText::new(*why).color(DIM).small());
+                        ui.add_space(4.0);
+                    }
+
+                    ui.separator();
+                    ui.label(
+                        RichText::new("Shortcuts are ignored while a text field has focus. Escape leaves the field.")
+                            .color(DIM)
+                            .small(),
+                    );
+                });
+            });
+        if !open {
+            self.show_help = false;
+        }
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("top").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -328,13 +554,7 @@ impl App {
                     }
                     (None, Some(err)) => {
                         ui.label(RichText::new("●").color(RED));
-                        // Only suggest logging in when logging in is the fix.
-                        let hint = if err.contains("locked") {
-                            err.clone()
-                        } else {
-                            format!("{err} — run `sc login`")
-                        };
-                        ui.label(RichText::new(hint).color(RED));
+                        ui.label(RichText::new(err.clone()).color(RED));
                     }
                     _ => {
                         ui.label(RichText::new("●").color(AMBER));
@@ -382,6 +602,13 @@ impl App {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("?")
+                        .on_hover_text("keyboard shortcuts")
+                        .clicked()
+                    {
+                        self.show_help = true;
+                    }
                     ui.selectable_value(&mut self.tab, Tab::Raw, "Raw");
                     ui.selectable_value(&mut self.tab, Tab::Log, "Log");
                     ui.selectable_value(&mut self.tab, Tab::Portfolio, "Portfolio");
@@ -415,18 +642,28 @@ impl App {
             });
 
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.new_isin).hint_text("ISIN").desired_width(150.0));
+                let add = ui.add(
+                    egui::TextEdit::singleline(&mut self.new_isin)
+                        .hint_text("ISIN")
+                        .desired_width(150.0),
+                );
+                if std::mem::take(&mut self.focus_add) {
+                    add.request_focus();
+                }
                 if ui.button("Add").clicked() && self.new_isin.trim().len() >= 6 {
                     let isin = self.new_isin.trim().to_uppercase();
                     let _ = self.io.tx.send(Cmd::WatchlistAdd(isin.clone()));
                     self.select(isin);
                     self.new_isin.clear();
                 }
-                ui.add(
+                let search = ui.add(
                     egui::TextEdit::singleline(&mut self.search_query)
                         .hint_text("search name or ticker")
                         .desired_width(200.0),
                 );
+                if std::mem::take(&mut self.focus_search) {
+                    search.request_focus();
+                }
                 if ui.button("Search").clicked() && !self.search_query.trim().is_empty() {
                     let _ = self.io.tx.send(Cmd::Search(self.search_query.trim().to_string()));
                 }

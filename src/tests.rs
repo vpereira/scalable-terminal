@@ -703,3 +703,82 @@ fn watchlist_add_reports_refusal_inside_a_success_envelope() {
         assert_eq!(on, Some(expected));
     }
 }
+
+/// Two actions on the same chord means one of them silently never fires, and
+/// the help window would list both as working.
+#[test]
+fn shortcut_chords_are_unique() {
+    use crate::shortcuts::BINDINGS;
+
+    let mut seen: Vec<(egui::Key, bool, bool, bool)> = Vec::new();
+    for b in BINDINGS {
+        let chord = (b.key, b.mods.shift, b.mods.command, b.mods.alt);
+        assert!(
+            !seen.contains(&chord),
+            "{:?} is bound twice: {} / {}",
+            b.key,
+            b.label,
+            b.shown
+        );
+        seen.push(chord);
+    }
+    assert_eq!(seen.len(), BINDINGS.len());
+}
+
+/// The help window renders by group, so a binding in no known group would be
+/// invisible while still working.
+#[test]
+fn every_shortcut_appears_in_the_help_window() {
+    use crate::shortcuts::{BINDINGS, GROUPS};
+
+    for b in BINDINGS {
+        assert!(
+            GROUPS.contains(&b.group),
+            "{} is in group {:?}, which the help window does not render",
+            b.label,
+            b.group
+        );
+        assert!(!b.shown.is_empty(), "{} has no printable chord", b.label);
+        assert!(!b.label.is_empty());
+    }
+    for g in GROUPS {
+        assert!(
+            BINDINGS.iter().any(|b| b.group == *g),
+            "group {g:?} is rendered but empty"
+        );
+    }
+}
+
+/// Submitting an order must never be reachable from the keyboard. The only
+/// order related binding is Preview, which runs phase one and places nothing.
+#[test]
+fn no_shortcut_can_place_an_order() {
+    use crate::shortcuts::{Act, BINDINGS, UNBOUND};
+
+    let order_acts: Vec<Act> = BINDINGS
+        .iter()
+        .map(|b| b.act)
+        .filter(|a| matches!(a, Act::Preview | Act::CancelOrder | Act::ArmTrail))
+        .collect();
+    assert!(order_acts.contains(&Act::Preview));
+
+    // Cancelling is destructive, so it must carry a modifier rather than sit on
+    // a bare key next to the arrows used for navigation.
+    let cancel = BINDINGS.iter().find(|b| b.act == Act::CancelOrder).unwrap();
+    assert!(cancel.mods.command, "cancel must require a modifier");
+
+    // Nothing in the table describes itself as submitting or confirming.
+    for b in BINDINGS {
+        let l = b.label.to_lowercase();
+        assert!(
+            !(l.contains("submit") || l.contains("confirm") || l.contains("move stop")),
+            "{} must not be bound to a key",
+            b.label
+        );
+    }
+
+    // And the omission is documented rather than accidental.
+    assert!(UNBOUND.iter().any(|(what, _)| what.contains("Submit")));
+    assert!(UNBOUND.iter().any(|(what, _)| what.contains("trailing stop")));
+    assert!(UNBOUND.iter().all(|(_, why)| !why.is_empty()));
+}

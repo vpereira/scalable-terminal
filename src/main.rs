@@ -3,6 +3,7 @@
 mod app;
 mod model;
 mod sc;
+mod shortcuts;
 mod worker;
 
 #[cfg(test)]

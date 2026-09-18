@@ -126,6 +126,16 @@ Main area:
 * Log. Every `sc` invocation, timed.
 * Raw. The unmodified JSON behind each endpoint.
 
+## Shortcuts
+
+`?` opens a window listing every binding, generated from the same table the handler uses, so the list cannot drift from what actually works. The top bar carries a `?` button for the same thing.
+
+Navigation is `1` to `5` for the views, arrows for the instrument, `/` and `A` for the search and add fields. `R` refreshes, `Space` pauses polling. On the chart, `[` and `]` step the timeframe, `C` switches candles and line, `Z` `X` `V` toggle the moving averages. On the ticket, `B` and `S` set the side, `M` `L` `T` the order type, `P` cycles the limit through bid, mid and ask, and `Enter` previews.
+
+Submitting an order has no shortcut and will not get one. The same goes for moving a trailing stop, which cancels a live stop. Both stay behind a deliberate click, and the help window says so rather than leaving the omission to look like an oversight.
+
+Shortcuts are suppressed while a text field has focus. Escape leaves the field.
+
 ## Orders
 
 Market, limit and stop. Venue overridable. No bracket or OCO, because the CLI has neither.

@@ -403,15 +403,26 @@ fn check_session(state: &Arc<Mutex<Shared>>) {
             s.session_error = None;
             s.push_log("whoami", call.elapsed.as_millis(), true, "session ok");
         }
-        Err(e) if e.kind == sc::ScErrorKind::DeviceLocked => {
-            // The session is fine; the machine is just locked. Keep whatever
-            // identity we already had and say what actually needs doing.
-            s.session_error = Some("Mac is locked, unlock it to resume".into());
-            s.push_log("whoami", call.elapsed.as_millis(), false, "device locked");
-        }
         Err(e) => {
-            s.session = None;
-            s.session_error = Some(format!("{e}"));
+            // Only a genuine auth failure means the session is gone. A locked
+            // Mac or a rate limit are transient, and telling the user to log in
+            // again would be wrong advice in both cases.
+            match e.kind {
+                sc::ScErrorKind::DeviceLocked => {
+                    s.session_error = Some("Mac is locked, unlock it to resume".into());
+                }
+                sc::ScErrorKind::RateLimited => {
+                    s.session_error = Some("rate limited, retrying shortly".into());
+                    s.note_rate_limit("whoami");
+                }
+                sc::ScErrorKind::Auth => {
+                    s.session = None;
+                    s.session_error = Some(format!("{e} — run `sc login`"));
+                }
+                _ => {
+                    s.session_error = Some(e.to_string());
+                }
+            }
             s.push_log("whoami", call.elapsed.as_millis(), false, e.to_string());
         }
     }
