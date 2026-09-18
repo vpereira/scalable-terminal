@@ -196,7 +196,27 @@ Preview runs the first phase. The dialog then shows everything the disclosure co
 
 Submit runs the second phase. It only becomes clickable when you have typed CONFIRM, the instrument is tradable, the confirmation has not expired, and any unsuitability warning has been accepted. When the validity countdown reaches zero the button disarms itself rather than letting the order fail at the broker.
 
-Order types are market, limit and stop. Venue can be overridden. There are no bracket, OCO or trailing orders, because the CLI does not offer them.
+Order types are market, limit and stop. Venue can be overridden. There are no bracket or OCO orders, because the CLI does not offer them.
+
+## Trailing stops
+
+The CLI has no trailing order type, no amend command, and nothing resembling OCO. So a trailing stop cannot be handed to the broker. It can only be imitated from here: watch the price, and when it rises far enough, cancel the resting stop and place a new one higher.
+
+This app does the watching and the arithmetic, and then asks you before it moves anything.
+
+Arm a trail on a position you hold, as a percentage or as an absolute amount. From then on the app tracks the high water mark, which only ever rises, and works out where the stop should sit. When the resting stop falls meaningfully behind, a button appears offering to move it up. Until you press that button nothing happens to your orders.
+
+Pressing it cancels the resting stop and previews the replacement. The usual confirm dialog appears, with full costs and the validity countdown, and you complete it the same way as any other order.
+
+Three things to understand before using it:
+
+The position is unprotected in the middle. Your shares are committed to the resting stop, so the old order has to be cancelled before a replacement can even be previewed. That ordering is forced by the broker. Between the cancel and your confirmation there is no stop on the position, and the app says so in red for as long as that is true.
+
+It only follows while the app is open, and only as finely as it polls. Close the terminal and your stop simply stays where it was last placed, still protecting you at that level, no longer tracking.
+
+It will not chase small moves. A replacement costs three calls and opens that unprotected window, so a ratchet is only offered once the improvement is worth at least a tenth of a percent.
+
+The high water mark is written to `~/.config/scalable-terminal/trails.json`, because it is the one piece of a trail that cannot be recovered from the broker. Everything else, the resting stop and the share count, is read back from live account state on every refresh, so an order you cancel or move elsewhere is picked up rather than quietly disagreed with.
 
 If you want a hard ceiling on order size, set `max_order_notional`, `allowed_isins` and `denied_isins` in the CLI's own `config.toml`. Those are enforced by the CLI itself, which is a better place for a risk limit than this app.
 

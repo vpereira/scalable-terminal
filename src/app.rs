@@ -58,6 +58,8 @@ pub struct App {
     /// The underlying the derivatives view is pinned to. Selecting a derivative
     /// row must not turn around and search for derivatives of a derivative.
     deriv_underlying: Option<String>,
+    trail_distance: f64,
+    trail_percent: bool,
     side: Side,
     order_type: OrderType,
     size_by_shares: bool,
@@ -111,6 +113,8 @@ impl App {
             deriv_type: 0,
             deriv_strategy: 0,
             deriv_underlying: None,
+            trail_distance: 3.0,
+            trail_percent: true,
             side: Side::Buy,
             order_type: OrderType::Limit,
             size_by_shares: false,
@@ -550,6 +554,8 @@ impl App {
                 ui.separator();
                 self.orders(ui);
                 ui.separator();
+                self.trails(ui);
+                ui.separator();
                 self.ticket(ui);
             });
         });
@@ -704,6 +710,171 @@ impl App {
         }
         if let Some(id) = cancel {
             let _ = self.io.tx.send(Cmd::CancelOrder(id));
+        }
+    }
+
+
+    /// Trailing stops. `sc` has no trailing order type, so a trail here is a
+    /// suggestion plus a button. Nothing moves without an explicit confirmation.
+    fn trails(&mut self, ui: &mut egui::Ui) {
+        let (trails, orders, quotes, gap, err) = {
+            let s = self.io.state.lock().unwrap();
+            (
+                s.trails.clone(),
+                s.orders.clone(),
+                s.quotes.clone(),
+                s.trail_gap.clone(),
+                s.trail_error.clone(),
+            )
+        };
+
+        ui.heading("Trailing stops");
+
+        if let Some(isin) = &gap {
+            ui.label(
+                RichText::new(format!("{isin} HAS NO STOP RIGHT NOW"))
+                    .color(Color32::WHITE)
+                    .background_color(RED)
+                    .strong(),
+            );
+            ui.label(
+                RichText::new("the old stop was cancelled and the replacement is not placed yet")
+                    .color(AMBER)
+                    .small(),
+            );
+        }
+        if let Some(e) = &err {
+            ui.label(RichText::new(e).color(RED));
+        }
+
+        // Arm a trail on whatever is selected, if it is actually held.
+        if let Some(isin) = self.selected.clone() {
+            let held = {
+                let s = self.io.state.lock().unwrap();
+                s.holdings.iter().any(|h| h.isin == isin && h.quantity > 0.0)
+            };
+            if held && !trails.iter().any(|t| t.isin == isin) {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("arm").color(DIM));
+                    ui.add(
+                        egui::DragValue::new(&mut self.trail_distance)
+                            .speed(0.1)
+                            .range(0.1..=90.0)
+                            .suffix(if self.trail_percent { " %" } else { "" }),
+                    );
+                    ui.selectable_value(&mut self.trail_percent, true, "%");
+                    ui.selectable_value(&mut self.trail_percent, false, "abs");
+                    if ui.button("Arm trail").clicked() {
+                        let distance = if self.trail_percent {
+                            self.trail_distance / 100.0
+                        } else {
+                            self.trail_distance
+                        };
+                        let _ = self.io.tx.send(Cmd::ArmTrail {
+                            isin: isin.clone(),
+                            distance,
+                            percent: self.trail_percent,
+                        });
+                    }
+                });
+            }
+        }
+
+        if trails.is_empty() {
+            ui.label(RichText::new("none armed").color(DIM));
+            return;
+        }
+
+        let mut ratchet: Option<String> = None;
+        let mut disarm: Option<String> = None;
+
+        for t in &trails {
+            let resting = orders.iter().find(|o| {
+                o.isin == t.isin && o.side.eq_ignore_ascii_case("SELL") && o.stop_price.is_some()
+            });
+            let current = resting.and_then(|o| o.stop_price);
+            let mid = quotes.get(&t.isin).and_then(|q| q.mid);
+            let suggested = t.suggested_stop();
+            let move_now = t.should_move(current);
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&t.isin).monospace().strong());
+                ui.label(
+                    RichText::new(if t.percent {
+                        format!("trail {:.2}%", t.distance * 100.0)
+                    } else {
+                        format!("trail {:.4}", t.distance)
+                    })
+                    .color(DIM),
+                );
+                if ui.small_button("disarm").clicked() {
+                    disarm = Some(t.isin.clone());
+                }
+            });
+
+            egui::Grid::new(format!("trail_{}", t.isin))
+                .num_columns(2)
+                .spacing([14.0, 2.0])
+                .show(ui, |ui| {
+                    let row = |ui: &mut egui::Ui, k: &str, v: RichText| {
+                        ui.label(RichText::new(k).color(DIM).small());
+                        ui.label(v);
+                        ui.end_row();
+                    };
+                    row(ui, "high water", RichText::new(format!("{:.4}", t.high_water)).monospace());
+                    row(ui, "price", RichText::new(num(mid, 4)).monospace());
+                    row(
+                        ui,
+                        "resting stop",
+                        match current {
+                            Some(c) => RichText::new(format!("{c:.4}")).monospace(),
+                            None => RichText::new("NONE").color(RED).monospace().strong(),
+                        },
+                    );
+                    row(
+                        ui,
+                        "suggested",
+                        RichText::new(num(suggested, 4))
+                            .monospace()
+                            .color(if move_now { AMBER } else { DIM }),
+                    );
+                    if let Some(c) = mid.and_then(|m| t.cushion(m, current)) {
+                        row(
+                            ui,
+                            "cushion",
+                            RichText::new(format!("{:.2}%", c * 100.0))
+                                .monospace()
+                                .color(if c < 0.01 { RED } else { DIM }),
+                        );
+                    }
+                });
+
+            if move_now {
+                let label = match current {
+                    Some(_) => "Move stop up",
+                    None => "Place stop",
+                };
+                if ui
+                    .add(egui::Button::new(RichText::new(label).strong()))
+                    .on_hover_text(
+                        "cancels the resting stop, then previews the replacement. \n\
+                         the position is unprotected until you confirm it.",
+                    )
+                    .clicked()
+                {
+                    ratchet = Some(t.isin.clone());
+                }
+            } else {
+                ui.label(RichText::new("stop is where it should be").color(DIM).small());
+            }
+        }
+
+        if let Some(isin) = ratchet {
+            let _ = self.io.tx.send(Cmd::RatchetTrail { isin });
+        }
+        if let Some(isin) = disarm {
+            let _ = self.io.tx.send(Cmd::DisarmTrail(isin));
         }
     }
 

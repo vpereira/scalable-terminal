@@ -568,3 +568,104 @@ fn derivatives_page_extracts_risk_metrics() {
     // Rows without an ISIN would be untradable — none may survive extraction.
     assert!(p.items.iter().all(|d| !d.isin.is_empty()));
 }
+
+/// A trailing stop must never loosen. The high water mark only rises, so the
+/// suggested stop can only rise with it.
+#[test]
+fn trail_high_water_and_stop_only_rise() {
+    let mut t = Trail::new("X", 0.03, true, 190.0);
+    assert!(close(t.high_water, 190.0));
+    assert!(close(t.suggested_stop().unwrap(), 184.3));
+
+    assert!(t.observe(194.20), "a higher mid advances the mark");
+    assert!(close(t.high_water, 194.20));
+    assert!(close(t.suggested_stop().unwrap(), 188.374));
+
+    // Falling prices change nothing at all.
+    for p in [191.0, 185.0, 150.0, 1.0] {
+        assert!(!t.observe(p), "{p} must not move the mark");
+        assert!(close(t.high_water, 194.20));
+        assert!(close(t.suggested_stop().unwrap(), 188.374));
+    }
+
+    // Garbage input must not poison the mark.
+    assert!(!t.observe(f64::NAN));
+    assert!(!t.observe(f64::INFINITY));
+    assert!(close(t.high_water, 194.20));
+}
+
+/// Rounding is downward, so it can only ever move the stop further from the
+/// market. Rounding up could trigger an exit that should not have happened.
+#[test]
+fn trail_rounds_the_stop_away_from_the_market() {
+    let t = Trail::new("X", 0.037, true, 123.4567);
+    let raw = 123.4567 * (1.0 - 0.037);
+    let s = t.suggested_stop().unwrap();
+    assert!(s <= raw, "rounded stop {s} must not exceed raw {raw}");
+    assert!(raw - s < 1e-4);
+
+    let abs = Trail::new("X", 2.5, false, 100.0);
+    assert!(close(abs.suggested_stop().unwrap(), 97.5));
+}
+
+/// Replacing costs three calls and opens an unprotected window, so a trail must
+/// not churn for a rounding error.
+#[test]
+fn trail_only_moves_for_a_worthwhile_improvement() {
+    let mut t = Trail::new("X", 0.03, true, 200.0);
+    let stop = t.suggested_stop().unwrap();
+    assert!(close(stop, 194.0));
+
+    // No resting stop at all: always worth placing one.
+    assert!(t.should_move(None));
+
+    // Already at the suggestion: nothing to do.
+    assert!(!t.should_move(Some(stop)));
+
+    // A resting stop above the suggestion is never dragged back down.
+    assert!(!t.should_move(Some(stop + 5.0)));
+
+    // Just under the minimum step is not worth the exposure.
+    let tiny = stop - stop * (t.min_step * 0.5);
+    assert!(!t.should_move(Some(tiny)));
+
+    // A full step is.
+    let worth = stop - stop * (t.min_step * 2.0);
+    assert!(t.should_move(Some(worth)));
+
+    // After a real rally the old stop is clearly stale.
+    t.observe(240.0);
+    assert!(t.should_move(Some(stop)));
+    assert!(close(t.suggested_stop().unwrap(), 232.8));
+}
+
+/// A misconfigured trail must produce no suggestion rather than a nonsense one.
+#[test]
+fn trail_rejects_impossible_distances() {
+    for (d, pct) in [(0.0, true), (-0.05, true), (1.0, true), (1.5, true), (0.0, false)] {
+        let t = Trail::new("X", d, pct, 100.0);
+        assert!(!t.valid(), "distance {d} percent {pct} must be rejected");
+        assert!(t.suggested_stop().is_none());
+        assert!(!t.should_move(None));
+    }
+
+    // An absolute distance wider than the price leaves no stop to place.
+    let t = Trail::new("X", 150.0, false, 100.0);
+    assert!(t.valid());
+    assert!(t.suggested_stop().is_none());
+    assert!(!t.should_move(None));
+}
+
+/// The cushion is what the user actually reads: how far price can fall before
+/// the stop is hit.
+#[test]
+fn trail_cushion_measures_distance_to_the_stop() {
+    let t = Trail::new("X", 0.03, true, 200.0);
+    // Against a resting stop, not the suggestion.
+    let c = t.cushion(200.0, Some(190.0)).unwrap();
+    assert!((c - 0.05).abs() < 1e-9);
+    // With no resting stop it falls back to where the stop would go.
+    let c = t.cushion(200.0, None).unwrap();
+    assert!((c - 0.03).abs() < 1e-9);
+    assert!(t.cushion(0.0, Some(190.0)).is_none());
+}
