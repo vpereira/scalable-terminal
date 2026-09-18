@@ -93,6 +93,21 @@ How the app handles this:
 
 Practical advice: if you widen the poll interval in the top bar and the latency readout stays flat, you have room. If you start seeing the pause banner, you are asking for charts faster than the backend will serve them.
 
+## The Mac must be unlocked
+
+`sc` signs every request with a key held in the Secure Enclave, and the Secure Enclave will not sign while the machine is locked. Lock your screen and every command fails immediately:
+
+```
+device_locked: The Mac is locked, so the Secure Enclave signing key cannot be
+used. Unlock the Mac and retry.
+```
+
+Your session is not lost. Nothing needs logging in again. But nothing works until you unlock, and that has consequences worth planning around.
+
+Live prices stop updating. Any monitoring stops. Most importantly, a trailing stop cannot follow the price while the machine is locked, so it holds at wherever it was last placed. If you rely on a trail, either keep the machine awake or accept that the stop freezes when you walk away. Orders already resting at the broker are unaffected, because they live on the broker's side and do not need your machine at all.
+
+The failure arrives with the same exit code as a genuine authentication error, so the app classifies it separately and says to unlock rather than offering useless advice about logging in again.
+
 ## Install and run
 
 Do these steps in order. The terminal is only a front end, so if the CLI underneath it is not working, the terminal will show you empty panels and you will have no idea why. Prove the CLI works first.

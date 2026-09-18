@@ -669,3 +669,20 @@ fn trail_cushion_measures_distance_to_the_stop() {
     assert!((c - 0.03).abs() < 1e-9);
     assert!(t.cushion(0.0, Some(190.0)).is_none());
 }
+
+/// `device_locked` arrives with exit code 20, the same as a real auth failure,
+/// but the session is intact and the fix is to unlock the Mac. Classifying it as
+/// an auth error would tell the user to log in again, which does nothing.
+#[test]
+fn device_locked_is_not_an_auth_failure() {
+    use crate::sc::ScErrorKind;
+
+    let raw = r#"{"ok":false,"command":"whoami","error":{"code":"device_locked","message":"The Mac is locked, so the Secure Enclave signing key cannot be used. Unlock the Mac and retry."},"hints":["If the Mac is already unlocked, check Secure Enclave and keychain access."]}"#;
+    let v: Value = serde_json::from_str(raw).unwrap();
+    assert_eq!(v["ok"], Value::Bool(false));
+    assert_eq!(v["error"]["code"], "device_locked");
+
+    assert_ne!(ScErrorKind::DeviceLocked, ScErrorKind::Auth);
+    assert_ne!(ScErrorKind::DeviceLocked, ScErrorKind::RateLimited);
+    assert_ne!(ScErrorKind::DeviceLocked, ScErrorKind::Generic);
+}

@@ -19,6 +19,11 @@ pub enum ScErrorKind {
     /// Backend rate limit. Distinct from a generic network error: retrying
     /// immediately makes it worse, so the caller must back off.
     RateLimited,
+    /// The Mac is locked, so the Secure Enclave cannot sign the request. This
+    /// arrives with the same exit code as an auth failure but is not one: the
+    /// session is intact and the fix is to unlock the machine, not to log in
+    /// again. Telling the user to run `sc login` here would be wrong.
+    DeviceLocked,
     Generic,
 }
 
@@ -131,10 +136,10 @@ fn parse_envelope(body: &str, exit: i32) -> Result<Value, ScError> {
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
-    let kind = if code == "rate_limited" {
-        ScErrorKind::RateLimited
-    } else {
-        ScErrorKind::from_code(exit)
+    let kind = match code.as_str() {
+        "rate_limited" => ScErrorKind::RateLimited,
+        "device_locked" => ScErrorKind::DeviceLocked,
+        _ => ScErrorKind::from_code(exit),
     };
     Err(ScError {
         kind,

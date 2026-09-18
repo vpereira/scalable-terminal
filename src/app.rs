@@ -308,6 +308,14 @@ impl App {
 
                 let s = self.io.state.lock().unwrap();
                 match (&s.session, &s.session_error) {
+                    (Some(who), Some(warn)) => {
+                        ui.label(RichText::new("●").color(AMBER));
+                        ui.label(
+                            RichText::new(if self.redact { "account holder" } else { who.as_str() })
+                                .monospace(),
+                        );
+                        ui.label(RichText::new(warn).color(AMBER));
+                    }
                     (Some(who), _) => {
                         ui.label(RichText::new("●").color(GREEN));
                         // The account holder's name is the one piece of the
@@ -320,7 +328,13 @@ impl App {
                     }
                     (None, Some(err)) => {
                         ui.label(RichText::new("●").color(RED));
-                        ui.label(RichText::new(format!("{err} — run `sc login`")).color(RED));
+                        // Only suggest logging in when logging in is the fix.
+                        let hint = if err.contains("locked") {
+                            err.clone()
+                        } else {
+                            format!("{err} — run `sc login`")
+                        };
+                        ui.label(RichText::new(hint).color(RED));
                     }
                     _ => {
                         ui.label(RichText::new("●").color(AMBER));

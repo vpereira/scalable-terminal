@@ -379,6 +379,12 @@ fn check_session(state: &Arc<Mutex<Shared>>) {
             s.session_error = None;
             s.push_log("whoami", call.elapsed.as_millis(), true, "session ok");
         }
+        Err(e) if e.kind == sc::ScErrorKind::DeviceLocked => {
+            // The session is fine; the machine is just locked. Keep whatever
+            // identity we already had and say what actually needs doing.
+            s.session_error = Some("Mac is locked, unlock it to resume".into());
+            s.push_log("whoami", call.elapsed.as_millis(), false, "device locked");
+        }
         Err(e) => {
             s.session = None;
             s.session_error = Some(format!("{e}"));
@@ -854,7 +860,9 @@ fn do_preview(state: &Arc<Mutex<Shared>>, intent: &TradeIntent) {
             }
         },
         Err(e) => {
-            if e.kind == sc::ScErrorKind::Auth {
+            if e.kind == sc::ScErrorKind::DeviceLocked {
+                s.session_error = Some("Mac is locked, unlock it to resume".into());
+            } else if e.kind == sc::ScErrorKind::Auth {
                 s.session = None;
                 s.session_error = Some(format!("{e} — run `sc login`"));
             }
