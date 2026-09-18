@@ -716,3 +716,67 @@ impl TradePreview {
         }
     }
 }
+
+/// One row from `broker derivatives search`. The payload carries metrics only —
+/// no name and no live quote; those arrive once the instrument is selected and
+/// the normal quote round picks it up.
+#[derive(Debug, Clone, Default)]
+pub struct Derivative {
+    pub isin: String,
+    pub issuer: String,
+    pub strategy: String,
+    pub subcategory: String,
+    pub leverage: Option<f64>,
+    pub factor: Option<f64>,
+    pub strike: Option<f64>,
+    pub strike_currency: String,
+    pub knockout_barrier: Option<f64>,
+    pub distance_to_knockout: Option<f64>,
+    pub premium_pct: Option<f64>,
+    pub expiry: String,
+    pub open_end: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DerivativesPage {
+    pub underlying: String,
+    pub derivative_type: String,
+    pub total_available: u64,
+    pub items: Vec<Derivative>,
+}
+
+impl DerivativesPage {
+    pub fn from_json(v: &Value) -> DerivativesPage {
+        let items = pick(v, &["items"])
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|d| Derivative {
+                        isin: str_at(d, &["isin"]).unwrap_or_default(),
+                        issuer: str_at(d, &["issuer"]).unwrap_or_default(),
+                        strategy: str_at(d, &["strategy"]).unwrap_or_default(),
+                        subcategory: str_at(d, &["product_subcategory"]).unwrap_or_default(),
+                        leverage: f64_at(d, &["leverage"]),
+                        factor: f64_at(d, &["factor"]),
+                        strike: f64_at(d, &["strike/value"]),
+                        strike_currency: str_at(d, &["strike/currency_iso_code"]).unwrap_or_default(),
+                        knockout_barrier: f64_at(d, &["knockout_barrier/value"]),
+                        distance_to_knockout: f64_at(d, &["distance_to_knockout"]),
+                        premium_pct: f64_at(d, &["premium_percentage"]),
+                        expiry: str_at(d, &["expiry_date"]).unwrap_or_default(),
+                        open_end: pick(d, &["expiry_is_open_end"])
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    })
+                    .filter(|d| !d.isin.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        DerivativesPage {
+            underlying: str_at(v, &["underlying_isin"]).unwrap_or_default(),
+            derivative_type: str_at(v, &["derivative_type"]).unwrap_or_default(),
+            total_available: f64_at(v, &["total_available"]).unwrap_or(0.0) as u64,
+            items,
+        }
+    }
+}

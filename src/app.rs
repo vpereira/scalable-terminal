@@ -22,6 +22,7 @@ const SMA_COLOURS: [Color32; 3] = [
 enum Tab {
     Portfolio,
     Chart,
+    Derivatives,
     Log,
     Raw,
 }
@@ -52,6 +53,11 @@ pub struct App {
     sma: [bool; 3],
     candles: bool,
     bars_target: usize,
+    deriv_type: usize,
+    deriv_strategy: usize,
+    /// The underlying the derivatives view is pinned to. Selecting a derivative
+    /// row must not turn around and search for derivatives of a derivative.
+    deriv_underlying: Option<String>,
     side: Side,
     order_type: OrderType,
     size_by_shares: bool,
@@ -80,6 +86,7 @@ impl App {
             .and_then(|s| s.tab.as_deref())
             .map(|t| match t {
                 "chart" => Tab::Chart,
+                "derivatives" => Tab::Derivatives,
                 "log" => Tab::Log,
                 "raw" => Tab::Raw,
                 _ => Tab::Portfolio,
@@ -101,6 +108,9 @@ impl App {
             sma: [false, false, false],
             candles: true,
             bars_target: 90,
+            deriv_type: 0,
+            deriv_strategy: 0,
+            deriv_underlying: None,
             side: Side::Buy,
             order_type: OrderType::Limit,
             size_by_shares: false,
@@ -342,6 +352,7 @@ impl App {
                     ui.selectable_value(&mut self.tab, Tab::Raw, "Raw");
                     ui.selectable_value(&mut self.tab, Tab::Log, "Log");
                     ui.selectable_value(&mut self.tab, Tab::Portfolio, "Portfolio");
+                    ui.selectable_value(&mut self.tab, Tab::Derivatives, "Derivatives");
                     ui.selectable_value(&mut self.tab, Tab::Chart, "Chart");
                 });
             });
@@ -861,6 +872,7 @@ impl App {
         egui::CentralPanel::default().show(ui, |ui| match self.tab {
             Tab::Portfolio => self.portfolio_view(ui),
             Tab::Chart => self.chart_view(ui),
+            Tab::Derivatives => self.derivatives_view(ui),
             Tab::Log => self.log_view(ui),
             Tab::Raw => self.raw_view(ui),
         });
@@ -1049,6 +1061,218 @@ impl App {
             }
             ui.add_space(20.0);
         });
+    }
+
+
+    /// Derivatives tradable on the selected underlying. Selecting a row makes
+    /// the derivative the active instrument (ticket + chart) without re-pinning
+    /// the search underlying.
+    fn derivatives_view(&mut self, ui: &mut egui::Ui) {
+        const TYPES: [&str; 3] = ["knockout", "factor", "warrant"];
+        // Knockouts and factors trade long/short; warrants trade call/put.
+        let strategies: &[&str] = if TYPES[self.deriv_type] == "warrant" {
+            &["call", "put"]
+        } else {
+            &["long", "short"]
+        };
+        self.deriv_strategy = self.deriv_strategy.min(strategies.len() - 1);
+
+        // Follow the selection unless the selection IS one of the listed
+        // derivatives (the user just clicked a row).
+        let (page, err, loading, held_off) = {
+            let s = self.io.state.lock().unwrap();
+            (
+                s.derivatives.clone(),
+                s.derivatives_error.clone(),
+                s.derivatives_loading,
+                s.backoff_secs_left().is_some(),
+            )
+        };
+        if let Some(sel) = self.selected.clone() {
+            let is_row = page.items.iter().any(|d| d.isin == sel);
+            if !is_row && self.deriv_underlying.as_deref() != Some(sel.as_str()) {
+                self.deriv_underlying = Some(sel);
+            }
+        }
+        let Some(underlying) = self.deriv_underlying.clone() else {
+            ui.label(RichText::new("select an instrument in the watchlist or portfolio").color(DIM));
+            return;
+        };
+
+        let mut reload = false;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Derivatives on").color(DIM));
+            ui.label(RichText::new(&underlying).monospace().strong());
+            ui.separator();
+            for (i, t) in TYPES.iter().enumerate() {
+                if ui.selectable_label(self.deriv_type == i, *t).clicked() && self.deriv_type != i {
+                    self.deriv_type = i;
+                    reload = true;
+                }
+            }
+            ui.separator();
+            for (i, st) in strategies.iter().enumerate() {
+                if ui.selectable_label(self.deriv_strategy == i, *st).clicked()
+                    && self.deriv_strategy != i
+                {
+                    self.deriv_strategy = i;
+                    reload = true;
+                }
+            }
+            ui.separator();
+            if ui.button("Load").clicked() {
+                reload = true;
+            }
+            if loading {
+                ui.spinner();
+            }
+            if !page.items.is_empty() && page.underlying == underlying {
+                ui.label(
+                    RichText::new(format!(
+                        "{} shown of {} available",
+                        page.items.len(),
+                        page.total_available
+                    ))
+                    .color(DIM)
+                    .small(),
+                );
+            }
+        });
+        if let Some(e) = err {
+            ui.label(RichText::new(e).color(RED));
+        }
+
+        // First visit for this underlying/filters: fetch without waiting for Load.
+        let stale = page.underlying != underlying
+            || !page
+                .derivative_type
+                .eq_ignore_ascii_case(TYPES[self.deriv_type]);
+        if (reload || (stale && !loading && !held_off)) && self.deriv_underlying.is_some() {
+            let _ = self.io.tx.send(Cmd::LoadDerivatives {
+                underlying: underlying.clone(),
+                dtype: TYPES[self.deriv_type].to_string(),
+                strategy: strategies[self.deriv_strategy].to_string(),
+            });
+        }
+
+        if page.items.is_empty() {
+            if !loading {
+                if page.underlying == underlying {
+                    // The search succeeded and came back empty: that is an answer.
+                    ui.label(
+                        RichText::new(format!(
+                            "no {} {} products exist on this underlying",
+                            TYPES[self.deriv_type], strategies[self.deriv_strategy]
+                        ))
+                        .color(AMBER),
+                    );
+                } else {
+                    ui.label(RichText::new("nothing loaded yet").color(DIM));
+                }
+            }
+            return;
+        }
+
+        ui.separator();
+        let mut pick: Option<String> = None;
+        let mut watch: Option<String> = None;
+        TableBuilder::new(ui)
+            .striped(true)
+            .cell_layout(egui::Layout::right_to_left(egui::Align::Center))
+            .column(Column::exact(120.0))
+            .column(Column::exact(110.0))
+            .column(Column::exact(96.0))
+            .column(Column::exact(60.0))
+            .column(Column::exact(84.0))
+            .column(Column::exact(84.0))
+            .column(Column::exact(70.0))
+            .column(Column::exact(76.0))
+            .column(Column::remainder().at_least(80.0))
+            .column(Column::exact(24.0))
+            .header(20.0, |mut h| {
+                for t in ["ISIN", "Issuer", "Product", "Lev", "Strike", "KO barrier", "Dist KO", "Premium", "Expiry", ""] {
+                    h.col(|ui| {
+                        if !t.is_empty() {
+                            ui.label(RichText::new(t).strong());
+                        }
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(20.0, page.items.len(), |mut row| {
+                    let d = &page.items[row.index()];
+                    let is_sel = self.selected.as_deref() == Some(d.isin.as_str());
+                    row.col(|ui| {
+                        if ui
+                            .selectable_label(is_sel, RichText::new(&d.isin).monospace())
+                            .clicked()
+                        {
+                            pick = Some(d.isin.clone());
+                        }
+                    });
+                    row.col(|ui| {
+                        ui.label(RichText::new(&d.issuer).color(DIM).small());
+                    });
+                    row.col(|ui| {
+                        ui.label(
+                            RichText::new(format!("{} {}", d.subcategory, d.strategy))
+                                .color(if d.strategy == "LONG" || d.strategy == "CALL" {
+                                    GREEN
+                                } else {
+                                    RED
+                                })
+                                .small(),
+                        );
+                    });
+                    row.col(|ui| {
+                        let lev = d.leverage.or(d.factor);
+                        ui.label(RichText::new(num(lev, 1)).monospace().strong());
+                    });
+                    row.col(|ui| {
+                        ui.label(RichText::new(num(d.strike, 2)).monospace())
+                            .on_hover_text(&d.strike_currency);
+                    });
+                    row.col(|ui| {
+                        ui.label(RichText::new(num(d.knockout_barrier, 2)).monospace());
+                    });
+                    row.col(|ui| {
+                        // Distance to knockout is the survival margin — colour it.
+                        let c = match d.distance_to_knockout {
+                            Some(x) if x < 0.05 => RED,
+                            Some(x) if x < 0.15 => AMBER,
+                            Some(_) => GREEN,
+                            None => DIM,
+                        };
+                        ui.label(
+                            RichText::new(num(d.distance_to_knockout.map(|x| x * 100.0), 1))
+                                .color(c)
+                                .monospace(),
+                        );
+                    });
+                    row.col(|ui| {
+                        ui.label(RichText::new(num(d.premium_pct.map(|x| x * 100.0), 2)).monospace());
+                    });
+                    row.col(|ui| {
+                        ui.label(
+                            RichText::new(if d.open_end { "open end" } else { d.expiry.as_str() })
+                                .color(DIM)
+                                .small(),
+                        );
+                    });
+                    row.col(|ui| {
+                        if ui.small_button("+").on_hover_text("add to watchlist").clicked() {
+                            watch = Some(d.isin.clone());
+                        }
+                    });
+                });
+            });
+
+        if let Some(isin) = pick {
+            self.select(isin);
+        }
+        if let Some(isin) = watch {
+            let _ = self.io.tx.send(Cmd::WatchlistAdd(isin));
+        }
     }
 
     fn chart_view(&mut self, ui: &mut egui::Ui) {

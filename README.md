@@ -38,6 +38,15 @@ Backend is the official `sc` CLI (Scalable Agentic Investing). No browser automa
 - Moving averages at 20, 50 and 200 **days**. A window longer than the loaded series is disabled, with the reason on hover, rather than drawn short.
 - Charts are cached per instrument and timeframe, because this endpoint is rate limited.
 
+### Derivatives tab
+
+- Click any instrument in the watchlist or positions, open Derivatives: every knockout, factor certificate or warrant tradable on that underlying, from `sc broker derivatives search`.
+- Filters for family (knockout, factor, warrant) and direction (long/short, call/put for warrants).
+- Columns: issuer, product, leverage, strike, knockout barrier, distance to knockout (colour-coded survival margin), premium, expiry.
+- Click a row to make the derivative the active instrument for the chart and order ticket; `+` adds it to the watchlist.
+- Same rate-limit discipline as charts: results cached per underlying and filter, requests refused during a backoff.
+- Rows carry metrics only. The endpoint publishes no name and no quote; those appear once the instrument is selected.
+
 ### Portfolio tab
 
 - Total, securities, cash, unrealized P&L as headline figures.

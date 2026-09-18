@@ -535,3 +535,36 @@ fn logical_failure_is_read_from_the_envelope() {
     assert_eq!(v["ok"], Value::Bool(false));
     assert_eq!(v["error"]["code"], "no_session");
 }
+
+const DERIVATIVES: &str = include_str!("../tests/fixtures/derivatives.json");
+
+/// Derivatives search rows carry metrics only — no name, no quote. The
+/// extractor must surface the risk numbers (leverage, barrier, distance to
+/// knockout) exactly, since the table sorts trading decisions by them.
+#[test]
+fn derivatives_page_extracts_risk_metrics() {
+    let data = envelope(DERIVATIVES);
+    let p = DerivativesPage::from_json(sc::result(&data));
+
+    assert_eq!(p.underlying, "US67066G1040");
+    assert_eq!(p.derivative_type, "knockout");
+    assert_eq!(p.items.len(), 5);
+    assert_eq!(p.total_available, 8223);
+
+    let d = p.items.iter().find(|d| d.isin == "DE000CJ8P2E4").expect("SocGen mini");
+    assert_eq!(d.issuer, "SOC_GEN");
+    assert_eq!(d.strategy, "LONG");
+    assert_eq!(d.subcategory, "MINI_FUTURE");
+    assert!((d.leverage.unwrap() - 1.0121381506).abs() < 1e-9);
+    assert!(close(d.strike.unwrap(), 2.6022));
+    assert_eq!(d.strike_currency, "USD");
+    assert!(close(d.knockout_barrier.unwrap(), 2.7425));
+    assert!(close(d.distance_to_knockout.unwrap(), 0.9875));
+    assert!(close(d.premium_pct.unwrap(), -0.0001));
+    assert!(d.open_end);
+    assert!(d.expiry.is_empty(), "open-end products have a null expiry_date");
+    assert!(d.factor.is_none(), "knockouts carry leverage, not a factor");
+
+    // Rows without an ISIN would be untradable — none may survive extraction.
+    assert!(p.items.iter().all(|d| !d.isin.is_empty()));
+}

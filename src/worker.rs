@@ -24,6 +24,7 @@ pub enum Cmd {
     WatchlistAdd(String),
     WatchlistRemove(String),
     LoadChart { isin: String, timeframe: String, force: bool },
+    LoadDerivatives { underlying: String, dtype: String, strategy: String },
     Search(String),
     PreviewTrade(TradeIntent),
     SubmitTrade { intent: TradeIntent, confirmation_id: String, accept_unsuitable: bool },
@@ -118,6 +119,10 @@ pub struct Shared {
     pub chart_loading: bool,
     /// Charts are expensive and rate limited; keep what we have fetched.
     pub chart_cache: HashMap<(String, String), Chart>,
+    pub derivatives: DerivativesPage,
+    pub derivatives_error: Option<String>,
+    pub derivatives_loading: bool,
+    pub derivatives_cache: HashMap<(String, String, String), DerivativesPage>,
     /// Set when the backend rate-limits us. All polling pauses until it passes.
     pub backoff_until: Option<Instant>,
     /// A chart request refused during backoff, re-issued once it lapses.
@@ -278,6 +283,9 @@ fn handle(state: &Arc<Mutex<Shared>>, cmd: Cmd) {
             refresh_watchlist(state);
         }
         Cmd::LoadChart { isin, timeframe, force } => load_chart(state, &isin, &timeframe, force),
+        Cmd::LoadDerivatives { underlying, dtype, strategy } => {
+            load_derivatives(state, &underlying, &dtype, &strategy)
+        }
         Cmd::Search(q) => do_search(state, &q),
         Cmd::PreviewTrade(intent) => do_preview(state, &intent),
         Cmd::SubmitTrade { intent, confirmation_id, accept_unsuitable } => {
@@ -548,6 +556,64 @@ fn load_chart(state: &Arc<Mutex<Shared>>, isin: &str, timeframe: &str, force: bo
             }
             s.chart = Chart { isin: isin.to_string(), timeframe: timeframe.to_string(), ..Default::default() };
             s.push_log("broker.chart", call.elapsed.as_millis(), false, format!("{}: {e}", call.cmdline()));
+        }
+    }
+}
+
+/// Same discipline as charts: this endpoint rate-limits readily, so cache per
+/// (underlying, type, strategy) and refuse a request during a backoff.
+fn load_derivatives(state: &Arc<Mutex<Shared>>, underlying: &str, dtype: &str, strategy: &str) {
+    let key = (underlying.to_string(), dtype.to_string(), strategy.to_string());
+    {
+        let mut s = state.lock().unwrap();
+        if let Some(p) = s.derivatives_cache.get(&key) {
+            s.derivatives = p.clone();
+            s.derivatives_error = None;
+            return;
+        }
+        if let Some(left) = s.backoff_secs_left() {
+            s.derivatives_error = Some(format!("rate limited — retrying in {left}s"));
+            return;
+        }
+        s.derivatives_loading = true;
+        s.derivatives_error = None;
+    }
+
+    let call = sc::run(&[
+        "broker", "derivatives", "search",
+        "--underlying", underlying,
+        "--type", dtype,
+        "--strategy", strategy,
+        "--limit", "50",
+    ]);
+    let mut s = state.lock().unwrap();
+    s.derivatives_loading = false;
+    match &call.data {
+        Ok(v) => {
+            let mut page = DerivativesPage::from_json(sc::result(v));
+            if page.underlying.is_empty() {
+                page.underlying = underlying.to_string();
+            }
+            let n = page.items.len();
+            let total = page.total_available;
+            s.derivatives_cache.insert(key, page.clone());
+            s.derivatives = page;
+            s.push_log(
+                "derivatives.search",
+                call.elapsed.as_millis(),
+                true,
+                format!("{underlying} {dtype}/{strategy}: {n} of {total}"),
+            );
+        }
+        Err(e) => {
+            if e.kind == sc::ScErrorKind::RateLimited {
+                s.note_rate_limit("derivatives.search");
+                s.derivatives_error =
+                    Some(format!("rate limited — retry in {}s", RATE_LIMIT_BACKOFF.as_secs()));
+            } else {
+                s.derivatives_error = Some(e.to_string());
+            }
+            s.push_log("derivatives.search", call.elapsed.as_millis(), false, e.to_string());
         }
     }
 }
