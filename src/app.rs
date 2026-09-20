@@ -645,12 +645,18 @@ impl App {
                     ui.label(RichText::new("paused").color(AMBER));
                 }
 
-                if let Some(left) = { self.io.state.lock().unwrap().backoff_secs_left() } {
+                let (left, level) = {
+                    let s = self.io.state.lock().unwrap();
+                    (s.backoff_secs_left(), s.backoff_level)
+                };
+                if let Some(left) = left {
                     ui.separator();
                     ui.label(
-                        RichText::new(format!("⏸ rate limited, resuming in {left}s"))
-                            .color(AMBER)
-                            .monospace(),
+                        RichText::new(format!(
+                            "⏸ rate limited, resuming in {left}s (attempt {level})"
+                        ))
+                        .color(if level > 2 { RED } else { AMBER })
+                        .monospace(),
                     );
                 }
 

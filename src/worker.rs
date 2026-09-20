@@ -15,6 +15,32 @@ use std::time::{Duration, Instant};
 
 pub const QUOTE_FANOUT: usize = 8;
 pub const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(90);
+pub const RATE_LIMIT_BACKOFF_MAX: Duration = Duration::from_secs(900);
+
+/// Which instruments to poll this round.
+///
+/// While probing, one call is enough to learn whether the limit has lifted, and
+/// spending the whole watchlist to find out that it has not is what kept the
+/// app stuck in a refusal loop.
+pub fn poll_list(all: Vec<String>, probing: bool) -> Vec<String> {
+    let mut list = all;
+    if probing {
+        list.truncate(1);
+    }
+    list
+}
+
+/// Backoff doubles with each consecutive refusal, capped.
+///
+/// A fixed wait is not enough: when the limit is a rolling quota rather than a
+/// short burst rule, retrying at full rate every 90 seconds just trips it again
+/// and the app never recovers.
+pub fn backoff_for(level: u32) -> Duration {
+    let secs = RATE_LIMIT_BACKOFF
+        .as_secs()
+        .saturating_mul(1u64 << level.min(6));
+    Duration::from_secs(secs.min(RATE_LIMIT_BACKOFF_MAX.as_secs()))
+}
 pub const TIMEFRAMES: [&str; 8] = ["1d", "7d", "1m", "3m", "6m", "ytd", "1y", "max"];
 
 #[derive(Debug, Clone)]
@@ -154,6 +180,11 @@ pub struct Shared {
     pub watchlist_error: Option<String>,
     /// Set when the backend rate-limits us. All polling pauses until it passes.
     pub backoff_until: Option<Instant>,
+    /// Consecutive refusals. Drives how long the next pause lasts.
+    pub backoff_level: u32,
+    /// After a pause, spend one call finding out whether the limit has lifted
+    /// rather than burning the whole watchlist to discover it has not.
+    pub probe_next: bool,
     /// A chart request refused during backoff, re-issued once it lapses.
     pub deferred_chart: Option<(String, String)>,
     pub search_results: Vec<Value>,
@@ -189,12 +220,16 @@ impl Shared {
     /// The backend rate-limits per endpoint; treat a hit as account-wide and
     /// stand down, because hammering a second endpoint will trip that one too.
     fn note_rate_limit(&mut self, from: &str) {
-        self.backoff_until = Some(Instant::now() + RATE_LIMIT_BACKOFF);
+        let wait = backoff_for(self.backoff_level);
+        self.backoff_level = (self.backoff_level + 1).min(6);
+        self.backoff_until = Some(Instant::now() + wait);
+        self.probe_next = true;
+        let level = self.backoff_level;
         self.push_log(
             "rate limited",
             0,
             false,
-            format!("{from}: backing off {}s", RATE_LIMIT_BACKOFF.as_secs()),
+            format!("{from}: backing off {}s (attempt {level})", wait.as_secs()),
         );
     }
 
@@ -276,9 +311,12 @@ fn worker_loop(
 
         if Instant::now() >= next_poll {
             let interval = *poll.lock().unwrap();
-            let held_off = state.lock().unwrap().backoff_secs_left().is_some();
+            let (held_off, probing) = {
+                let s = state.lock().unwrap();
+                (s.backoff_secs_left().is_some(), s.probe_next)
+            };
             if interval > Duration::ZERO && !held_off {
-                let list = state.lock().unwrap().watchlist_plus_holdings();
+                let list = poll_list(state.lock().unwrap().watchlist_plus_holdings(), probing);
                 if !list.is_empty() {
                     refresh_quotes(&state, &list);
                     ctx.request_repaint();
@@ -739,6 +777,13 @@ fn refresh_quotes(state: &Arc<Mutex<Shared>>, isins: &[String]) {
     );
     if limited {
         s.note_rate_limit("broker.quote");
+    } else if failures == 0 {
+        // Only a round that fully succeeded proves the limit has lifted.
+        if s.backoff_level > 0 || s.probe_next {
+            s.push_log("rate limit", 0, true, "clear, resuming full rate");
+        }
+        s.backoff_level = 0;
+        s.probe_next = false;
     }
 }
 

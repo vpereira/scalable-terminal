@@ -886,3 +886,66 @@ fn no_shortcut_can_place_an_order() {
     );
     assert!(UNBOUND.iter().all(|(_, why)| !why.is_empty()));
 }
+
+/// A fixed pause is not enough when the limit is a rolling quota: retrying at
+/// full rate after every pause trips it again and the app never recovers.
+#[test]
+fn backoff_doubles_and_then_caps() {
+    use crate::worker::{RATE_LIMIT_BACKOFF, RATE_LIMIT_BACKOFF_MAX, backoff_for};
+    use std::time::Duration;
+
+    assert_eq!(backoff_for(0), RATE_LIMIT_BACKOFF);
+    assert_eq!(backoff_for(1), RATE_LIMIT_BACKOFF * 2);
+    assert_eq!(backoff_for(2), RATE_LIMIT_BACKOFF * 4);
+
+    // Never shrinks as the level rises.
+    for level in 0..12 {
+        assert!(
+            backoff_for(level + 1) >= backoff_for(level),
+            "level {level}"
+        );
+    }
+
+    // And never grows without bound, however many refusals arrive.
+    for level in 0..64 {
+        assert!(
+            backoff_for(level) <= RATE_LIMIT_BACKOFF_MAX,
+            "level {level}"
+        );
+    }
+    assert_eq!(backoff_for(32), RATE_LIMIT_BACKOFF_MAX);
+
+    // The first pause has to be longer than the 46 seconds recovery measured
+    // against the live backend, or the retry lands while still refused.
+    assert!(backoff_for(0) >= Duration::from_secs(60));
+}
+
+/// After a pause the app must spend one call finding out whether the limit has
+/// lifted. Retrying the whole watchlist is what kept it in a refusal loop.
+#[test]
+fn probe_round_polls_a_single_instrument() {
+    use crate::worker::poll_list;
+
+    let all: Vec<String> = ["A", "B", "C", "D"].iter().map(|s| s.to_string()).collect();
+
+    assert_eq!(
+        poll_list(all.clone(), false).len(),
+        4,
+        "normal rounds poll everything"
+    );
+    assert_eq!(
+        poll_list(all.clone(), true).len(),
+        1,
+        "a probe costs one call"
+    );
+    assert_eq!(poll_list(all, true)[0], "A");
+
+    // Nothing to poll stays nothing, in either mode.
+    assert!(poll_list(Vec::new(), true).is_empty());
+    assert!(poll_list(Vec::new(), false).is_empty());
+
+    // A single instrument is already its own probe.
+    let one = vec!["X".to_string()];
+    assert_eq!(poll_list(one.clone(), true), one);
+    assert_eq!(poll_list(one.clone(), false), one);
+}
