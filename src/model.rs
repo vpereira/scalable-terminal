@@ -680,7 +680,8 @@ impl TradePreview {
             venue: str_at(v, &["result/tradability/selected_venue_label"])
                 .or_else(|| str_at(v, &["result/tradability/selected_venue"]))
                 .unwrap_or_default(),
-            venue_status: str_at(v, &["result/tradability/selected_venue_status"]).unwrap_or_default(),
+            venue_status: str_at(v, &["result/tradability/selected_venue_status"])
+                .unwrap_or_default(),
             requires_accept_unsuitable: bool_at(v, "result/suitability/requires_accept_unsuitable"),
             suitability_status: str_at(v, &["result/suitability/status"]).unwrap_or_default(),
             entry_cost: f64_at(v, &["result/ex_ante_costs/entryCosts/total/amount"]),
@@ -759,7 +760,8 @@ impl DerivativesPage {
                         leverage: f64_at(d, &["leverage"]),
                         factor: f64_at(d, &["factor"]),
                         strike: f64_at(d, &["strike/value"]),
-                        strike_currency: str_at(d, &["strike/currency_iso_code"]).unwrap_or_default(),
+                        strike_currency: str_at(d, &["strike/currency_iso_code"])
+                            .unwrap_or_default(),
                         knockout_barrier: f64_at(d, &["knockout_barrier/value"]),
                         distance_to_knockout: f64_at(d, &["distance_to_knockout"]),
                         premium_pct: f64_at(d, &["premium_percentage"]),

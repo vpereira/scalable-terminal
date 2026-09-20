@@ -70,21 +70,98 @@ macro_rules! b {
 
 pub const BINDINGS: &[Binding] = &[
     b!(ViewChart, Num1, Modifiers::NONE, "1", "Chart", NAV),
-    b!(ViewDerivatives, Num2, Modifiers::NONE, "2", "Derivatives", NAV),
+    b!(
+        ViewDerivatives,
+        Num2,
+        Modifiers::NONE,
+        "2",
+        "Derivatives",
+        NAV
+    ),
     b!(ViewPortfolio, Num3, Modifiers::NONE, "3", "Portfolio", NAV),
     b!(ViewLog, Num4, Modifiers::NONE, "4", "Log", NAV),
     b!(ViewRaw, Num5, Modifiers::NONE, "5", "Raw", NAV),
-    b!(PrevInstrument, ArrowUp, Modifiers::NONE, "Up", "Previous instrument", NAV),
-    b!(NextInstrument, ArrowDown, Modifiers::NONE, "Down", "Next instrument", NAV),
-    b!(FocusSearch, Slash, Modifiers::NONE, "/", "Focus the search field", NAV),
-    b!(FocusAdd, A, Modifiers::NONE, "A", "Focus the add ISIN field", NAV),
-    b!(Help, Questionmark, Modifiers::SHIFT, "?", "This window", NAV),
+    b!(
+        PrevInstrument,
+        ArrowUp,
+        Modifiers::NONE,
+        "Up",
+        "Previous instrument",
+        NAV
+    ),
+    b!(
+        NextInstrument,
+        ArrowDown,
+        Modifiers::NONE,
+        "Down",
+        "Next instrument",
+        NAV
+    ),
+    b!(
+        FocusSearch,
+        Slash,
+        Modifiers::NONE,
+        "/",
+        "Focus the search field",
+        NAV
+    ),
+    b!(
+        FocusAdd,
+        A,
+        Modifiers::NONE,
+        "A",
+        "Focus the add ISIN field",
+        NAV
+    ),
+    b!(
+        Help,
+        Questionmark,
+        Modifiers::SHIFT,
+        "?",
+        "This window",
+        NAV
+    ),
     b!(Refresh, R, Modifiers::NONE, "R", "Refresh everything", DATA),
-    b!(RefreshQuotes, R, Modifiers::SHIFT, "Shift R", "Refresh quotes only", DATA),
-    b!(TogglePause, Space, Modifiers::NONE, "Space", "Pause or resume polling", DATA),
-    b!(PrevTimeframe, OpenBracket, Modifiers::NONE, "[", "Previous timeframe", CHART),
-    b!(NextTimeframe, CloseBracket, Modifiers::NONE, "]", "Next timeframe", CHART),
-    b!(ToggleCandles, C, Modifiers::NONE, "C", "Candles or line", CHART),
+    b!(
+        RefreshQuotes,
+        R,
+        Modifiers::SHIFT,
+        "Shift R",
+        "Refresh quotes only",
+        DATA
+    ),
+    b!(
+        TogglePause,
+        Space,
+        Modifiers::NONE,
+        "Space",
+        "Pause or resume polling",
+        DATA
+    ),
+    b!(
+        PrevTimeframe,
+        OpenBracket,
+        Modifiers::NONE,
+        "[",
+        "Previous timeframe",
+        CHART
+    ),
+    b!(
+        NextTimeframe,
+        CloseBracket,
+        Modifiers::NONE,
+        "]",
+        "Next timeframe",
+        CHART
+    ),
+    b!(
+        ToggleCandles,
+        C,
+        Modifiers::NONE,
+        "C",
+        "Candles or line",
+        CHART
+    ),
     b!(Sma20, Z, Modifiers::NONE, "Z", "Toggle SMA 20", CHART),
     b!(Sma50, X, Modifiers::NONE, "X", "Toggle SMA 50", CHART),
     b!(Sma200, V, Modifiers::NONE, "V", "Toggle SMA 200", CHART),
@@ -94,11 +171,46 @@ pub const BINDINGS: &[Binding] = &[
     b!(TypeMarket, M, Modifiers::NONE, "M", "Market order", TICKET),
     b!(TypeLimit, L, Modifiers::NONE, "L", "Limit order", TICKET),
     b!(TypeStop, T, Modifiers::NONE, "T", "Stop order", TICKET),
-    b!(ToggleSizeMode, Q, Modifiers::NONE, "Q", "Size by shares or amount", TICKET),
-    b!(CyclePrice, P, Modifiers::NONE, "P", "Limit price: bid, mid, ask", TICKET),
-    b!(Preview, Enter, Modifiers::NONE, "Enter", "Preview, places nothing", TICKET),
-    b!(CancelOrder, Backspace, Modifiers::COMMAND, "Cmd Backspace", "Cancel selected working order", ORDERS),
-    b!(ArmTrail, T, Modifiers::SHIFT, "Shift T", "Arm a trail on the selection", ORDERS),
+    b!(
+        ToggleSizeMode,
+        Q,
+        Modifiers::NONE,
+        "Q",
+        "Size by shares or amount",
+        TICKET
+    ),
+    b!(
+        CyclePrice,
+        P,
+        Modifiers::NONE,
+        "P",
+        "Limit price: bid, mid, ask",
+        TICKET
+    ),
+    b!(
+        Preview,
+        Enter,
+        Modifiers::NONE,
+        "Enter",
+        "Preview, places nothing",
+        TICKET
+    ),
+    b!(
+        CancelOrder,
+        Backspace,
+        Modifiers::COMMAND,
+        "Cmd Backspace",
+        "Cancel selected working order",
+        ORDERS
+    ),
+    b!(
+        ArmTrail,
+        T,
+        Modifiers::SHIFT,
+        "Shift T",
+        "Arm a trail on the selection",
+        ORDERS
+    ),
 ];
 
 pub const GROUPS: &[&str] = &[NAV, DATA, CHART, TICKET, ORDERS];

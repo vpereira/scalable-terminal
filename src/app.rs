@@ -1,6 +1,6 @@
 use crate::model::*;
 use crate::shortcuts::{self, Act};
-use crate::worker::{self, Cmd, Handle, TradeIntent, TIMEFRAMES};
+use crate::worker::{self, Cmd, Handle, TIMEFRAMES, TradeIntent};
 use egui::{Color32, RichText};
 use egui_extras::{Column, TableBuilder};
 use std::sync::{Arc, Mutex};
@@ -170,11 +170,11 @@ impl App {
             self.shot_started = Some(std::time::Instant::now());
         }
         // A capture that never arrives must not hang the process.
-        if let Some(t0) = self.shot_started {
-            if t0.elapsed() > std::time::Duration::from_secs(60) {
-                eprintln!("screenshot timed out after 60s");
-                std::process::exit(2);
-            }
+        if let Some(t0) = self.shot_started
+            && t0.elapsed() > std::time::Duration::from_secs(60)
+        {
+            eprintln!("screenshot timed out after 60s");
+            std::process::exit(2);
         }
         // Keep repainting: without input egui would idle before the data arrives.
         ctx.request_repaint();
@@ -231,7 +231,11 @@ impl App {
     }
 
     fn load_chart(&self, isin: String, force: bool) {
-        let _ = self.io.tx.send(Cmd::LoadChart { isin, timeframe: self.timeframe.clone(), force });
+        let _ = self.io.tx.send(Cmd::LoadChart {
+            isin,
+            timeframe: self.timeframe.clone(),
+            force,
+        });
     }
 }
 
@@ -245,8 +249,16 @@ fn num(v: Option<f64>, dp: usize) -> String {
 fn signed_text(v: Option<f64>, dp: usize, suffix: &str) -> RichText {
     match v {
         Some(x) => {
-            let c = if x > 0.0 { GREEN } else if x < 0.0 { RED } else { DIM };
-            RichText::new(format!("{x:+.dp$}{suffix}")).color(c).monospace()
+            let c = if x > 0.0 {
+                GREEN
+            } else if x < 0.0 {
+                RED
+            } else {
+                DIM
+            };
+            RichText::new(format!("{x:+.dp$}{suffix}"))
+                .color(c)
+                .monospace()
         }
         None => RichText::new("—").color(DIM).monospace(),
     }
@@ -262,9 +274,7 @@ fn stat(ui: &mut egui::Ui, caption: &str, value: String, color: Color32) {
     ui.allocate_ui(egui::vec2(170.0, 46.0), |ui| {
         ui.vertical(|ui| {
             ui.label(RichText::new(caption).color(DIM).small());
-            ui.label(
-                RichText::new(value).color(color).monospace().size(19.0),
-            );
+            ui.label(RichText::new(value).color(color).monospace().size(19.0));
         });
     });
 }
@@ -315,7 +325,6 @@ impl eframe::App for App {
 }
 
 impl App {
-
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         // Escape is the one key that must work while a field has focus.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -390,7 +399,10 @@ impl App {
                 let id = {
                     let s = self.io.state.lock().unwrap();
                     self.selected.as_ref().and_then(|isin| {
-                        s.orders.iter().find(|o| &o.isin == isin).map(|o| o.id.clone())
+                        s.orders
+                            .iter()
+                            .find(|o| &o.isin == isin)
+                            .map(|o| o.id.clone())
                     })
                 };
                 if let Some(id) = id {
@@ -401,7 +413,9 @@ impl App {
                 if let Some(isin) = self.selected.clone() {
                     let held = {
                         let s = self.io.state.lock().unwrap();
-                        s.holdings.iter().any(|h| h.isin == isin && h.quantity > 0.0)
+                        s.holdings
+                            .iter()
+                            .any(|h| h.isin == isin && h.quantity > 0.0)
                     };
                     if held {
                         let distance = if self.trail_percent {
@@ -537,8 +551,12 @@ impl App {
                     (Some(who), Some(warn)) => {
                         ui.label(RichText::new("●").color(AMBER));
                         ui.label(
-                            RichText::new(if self.redact { "account holder" } else { who.as_str() })
-                                .monospace(),
+                            RichText::new(if self.redact {
+                                "account holder"
+                            } else {
+                                who.as_str()
+                            })
+                            .monospace(),
                         );
                         ui.label(RichText::new(warn).color(AMBER));
                     }
@@ -548,8 +566,12 @@ impl App {
                         // screen that identifies a person, so it can be hidden
                         // for screenshots and screen sharing.
                         ui.label(
-                            RichText::new(if self.redact { "account holder" } else { who.as_str() })
-                                .monospace(),
+                            RichText::new(if self.redact {
+                                "account holder"
+                            } else {
+                                who.as_str()
+                            })
+                            .monospace(),
                         );
                     }
                     (None, Some(err)) => {
@@ -567,15 +589,22 @@ impl App {
                 ui.separator();
                 // Polling is the whole latency story here — keep it on screen.
                 ui.label(
-                    RichText::new(format!("{calls} quotes / {round} ms ({avg:.0} ms per call)"))
-                        .color(if round > 3000 { AMBER } else { DIM })
-                        .monospace(),
+                    RichText::new(format!(
+                        "{calls} quotes / {round} ms ({avg:.0} ms per call)"
+                    ))
+                    .color(if round > 3000 { AMBER } else { DIM })
+                    .monospace(),
                 );
 
                 ui.separator();
                 ui.label("every");
                 if ui
-                    .add(egui::DragValue::new(&mut self.poll_secs).speed(0.5).range(0.0..=300.0).suffix(" s"))
+                    .add(
+                        egui::DragValue::new(&mut self.poll_secs)
+                            .speed(0.5)
+                            .range(0.0..=300.0)
+                            .suffix(" s"),
+                    )
                     .changed()
                 {
                     *self.poll.lock().unwrap() = Duration::from_secs_f32(self.poll_secs);
@@ -832,42 +861,49 @@ impl App {
     }
 
     fn right_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::right("book").resizable(true).default_size(430.0).max_size(900.0).show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                let acct = { self.io.state.lock().unwrap().account.clone() };
+        egui::Panel::right("book")
+            .resizable(true)
+            .default_size(430.0)
+            .max_size(900.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let acct = { self.io.state.lock().unwrap().account.clone() };
 
-                ui.horizontal(|ui| {
-                    ui.heading("Account");
-                    ui.label(RichText::new(&acct.currency).color(DIM).monospace());
-                });
-                egui::Grid::new("acct").num_columns(2).spacing([18.0, 2.0]).show(ui, |ui| {
-                    let r = |ui: &mut egui::Ui, k: &str, v: String| {
-                        ui.label(RichText::new(k).color(DIM));
-                        ui.label(RichText::new(v).monospace());
-                        ui.end_row();
-                    };
-                    r(ui, "Total", num(acct.total, 2));
-                    r(ui, "Securities", num(acct.securities, 2));
-                    r(ui, "Cash", num(acct.cash, 2));
-                    r(ui, "Buying power", num(acct.buying_power, 2));
-                    if acct.pending_buy_orders.unwrap_or(0.0) != 0.0 {
-                        r(ui, "Reserved by orders", num(acct.pending_buy_orders, 2));
-                    }
-                    if acct.possible_taxes.unwrap_or(0.0) != 0.0 {
-                        r(ui, "Possible taxes", num(acct.possible_taxes, 2));
-                    }
-                });
+                    ui.horizontal(|ui| {
+                        ui.heading("Account");
+                        ui.label(RichText::new(&acct.currency).color(DIM).monospace());
+                    });
+                    egui::Grid::new("acct")
+                        .num_columns(2)
+                        .spacing([18.0, 2.0])
+                        .show(ui, |ui| {
+                            let r = |ui: &mut egui::Ui, k: &str, v: String| {
+                                ui.label(RichText::new(k).color(DIM));
+                                ui.label(RichText::new(v).monospace());
+                                ui.end_row();
+                            };
+                            r(ui, "Total", num(acct.total, 2));
+                            r(ui, "Securities", num(acct.securities, 2));
+                            r(ui, "Cash", num(acct.cash, 2));
+                            r(ui, "Buying power", num(acct.buying_power, 2));
+                            if acct.pending_buy_orders.unwrap_or(0.0) != 0.0 {
+                                r(ui, "Reserved by orders", num(acct.pending_buy_orders, 2));
+                            }
+                            if acct.possible_taxes.unwrap_or(0.0) != 0.0 {
+                                r(ui, "Possible taxes", num(acct.possible_taxes, 2));
+                            }
+                        });
 
-                ui.separator();
-                self.positions(ui);
-                ui.separator();
-                self.orders(ui);
-                ui.separator();
-                self.trails(ui);
-                ui.separator();
-                self.ticket(ui);
+                    ui.separator();
+                    self.positions(ui);
+                    ui.separator();
+                    self.orders(ui);
+                    ui.separator();
+                    self.trails(ui);
+                    ui.separator();
+                    self.ticket(ui);
+                });
             });
-        });
     }
 
     fn positions(&mut self, ui: &mut egui::Ui) {
@@ -977,7 +1013,11 @@ impl App {
         let mut pick: Option<String> = None;
         for o in &orders {
             ui.horizontal(|ui| {
-                let c = if o.side.eq_ignore_ascii_case("SELL") { RED } else { GREEN };
+                let c = if o.side.eq_ignore_ascii_case("SELL") {
+                    RED
+                } else {
+                    GREEN
+                };
                 ui.label(RichText::new(&o.side).color(c).monospace().strong());
                 if ui
                     .selectable_label(
@@ -994,7 +1034,8 @@ impl App {
                     }
                     None => {
                         ui.label(
-                            RichText::new(format!("{} {}", num(o.amount, 2), o.currency)).monospace(),
+                            RichText::new(format!("{} {}", num(o.amount, 2), o.currency))
+                                .monospace(),
                         );
                     }
                 }
@@ -1002,16 +1043,23 @@ impl App {
                     ui.label(RichText::new(format!("lmt {l:.4}")).monospace().color(BLUE));
                 }
                 if let Some(sp) = o.stop_price {
-                    ui.label(RichText::new(format!("stp {sp:.4}")).monospace().color(AMBER));
+                    ui.label(
+                        RichText::new(format!("stp {sp:.4}"))
+                            .monospace()
+                            .color(AMBER),
+                    );
                 }
                 if ui.small_button("cancel").clicked() {
                     cancel = Some(o.id.clone());
                 }
             });
             ui.label(
-                RichText::new(format!("   {} · {} · {}", o.description, o.status, o.last_event))
-                    .color(DIM)
-                    .small(),
+                RichText::new(format!(
+                    "   {} · {} · {}",
+                    o.description, o.status, o.last_event
+                ))
+                .color(DIM)
+                .small(),
             );
         }
         if let Some(p) = pick {
@@ -1021,7 +1069,6 @@ impl App {
             let _ = self.io.tx.send(Cmd::CancelOrder(id));
         }
     }
-
 
     /// Trailing stops. `sc` has no trailing order type, so a trail here is a
     /// suggestion plus a button. Nothing moves without an explicit confirmation.
@@ -1060,7 +1107,9 @@ impl App {
         if let Some(isin) = self.selected.clone() {
             let held = {
                 let s = self.io.state.lock().unwrap();
-                s.holdings.iter().any(|h| h.isin == isin && h.quantity > 0.0)
+                s.holdings
+                    .iter()
+                    .any(|h| h.isin == isin && h.quantity > 0.0)
             };
             if held && !trails.iter().any(|t| t.isin == isin) {
                 ui.horizontal(|ui| {
@@ -1131,7 +1180,11 @@ impl App {
                         ui.label(v);
                         ui.end_row();
                     };
-                    row(ui, "high water", RichText::new(format!("{:.4}", t.high_water)).monospace());
+                    row(
+                        ui,
+                        "high water",
+                        RichText::new(format!("{:.4}", t.high_water)).monospace(),
+                    );
                     row(ui, "price", RichText::new(num(mid, 4)).monospace());
                     row(
                         ui,
@@ -1175,7 +1228,11 @@ impl App {
                     ratchet = Some(t.isin.clone());
                 }
             } else {
-                ui.label(RichText::new("stop is where it should be").color(DIM).small());
+                ui.label(
+                    RichText::new("stop is where it should be")
+                        .color(DIM)
+                        .small(),
+                );
             }
         }
 
@@ -1206,8 +1263,16 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&isin).monospace().strong());
             if let Some(q) = &q {
-                ui.label(RichText::new(format!("bid {}", num(q.bid, 4))).monospace().color(RED));
-                ui.label(RichText::new(format!("ask {}", num(q.ask, 4))).monospace().color(GREEN));
+                ui.label(
+                    RichText::new(format!("bid {}", num(q.bid, 4)))
+                        .monospace()
+                        .color(RED),
+                );
+                ui.label(
+                    RichText::new(format!("ask {}", num(q.ask, 4)))
+                        .monospace()
+                        .color(GREEN),
+                );
                 if let Some(b) = q.spread_bps() {
                     ui.label(RichText::new(format!("{b:.1} bps")).color(DIM).monospace());
                 }
@@ -1215,8 +1280,16 @@ impl App {
         });
 
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.side, Side::Buy, RichText::new("BUY").color(GREEN).strong());
-            ui.selectable_value(&mut self.side, Side::Sell, RichText::new("SELL").color(RED).strong());
+            ui.selectable_value(
+                &mut self.side,
+                Side::Buy,
+                RichText::new("BUY").color(GREEN).strong(),
+            );
+            ui.selectable_value(
+                &mut self.side,
+                Side::Sell,
+                RichText::new("SELL").color(RED).strong(),
+            );
             ui.separator();
             ui.selectable_value(&mut self.order_type, OrderType::Market, "Market");
             ui.selectable_value(&mut self.order_type, OrderType::Limit, "Limit");
@@ -1238,15 +1311,23 @@ impl App {
                                     .small(),
                             );
                         }
-                        ui.label(RichText::new(format!("· free {free:.4}")).color(if free > 0.0 {
-                            GREEN
-                        } else {
-                            RED
-                        }));
-                        if ui.add_enabled(free > 0.0, egui::Button::new("all").small()).clicked() {
+                        ui.label(
+                            RichText::new(format!("· free {free:.4}")).color(if free > 0.0 {
+                                GREEN
+                            } else {
+                                RED
+                            }),
+                        );
+                        if ui
+                            .add_enabled(free > 0.0, egui::Button::new("all").small())
+                            .clicked()
+                        {
                             self.shares = free;
                         }
-                        if ui.add_enabled(free > 0.0, egui::Button::new("half").small()).clicked() {
+                        if ui
+                            .add_enabled(free > 0.0, egui::Button::new("half").small())
+                            .clicked()
+                        {
                             self.shares = (free / 2.0 * 10_000.0).floor() / 10_000.0;
                         }
                     });
@@ -1274,17 +1355,34 @@ impl App {
         ui.horizontal(|ui| {
             if self.size_by_shares {
                 ui.label("Shares");
-                ui.add(egui::DragValue::new(&mut self.shares).speed(0.1).range(0.0..=1e9));
+                ui.add(
+                    egui::DragValue::new(&mut self.shares)
+                        .speed(0.1)
+                        .range(0.0..=1e9),
+                );
                 if let Some(p) = q.as_ref().and_then(|q| q.mid) {
-                    ui.label(RichText::new(format!("≈ {:.2}", p * self.shares)).color(DIM).monospace());
+                    ui.label(
+                        RichText::new(format!("≈ {:.2}", p * self.shares))
+                            .color(DIM)
+                            .monospace(),
+                    );
                 }
             } else {
                 ui.label("Amount");
-                ui.add(egui::DragValue::new(&mut self.amount).speed(10.0).range(0.0..=1e9).suffix(" €"));
-                if let Some(p) = q.as_ref().and_then(|q| q.ask.or(q.mid)) {
-                    if p > 0.0 {
-                        ui.label(RichText::new(format!("≈ {:.4} sh", self.amount / p)).color(DIM).monospace());
-                    }
+                ui.add(
+                    egui::DragValue::new(&mut self.amount)
+                        .speed(10.0)
+                        .range(0.0..=1e9)
+                        .suffix(" €"),
+                );
+                if let Some(p) = q.as_ref().and_then(|q| q.ask.or(q.mid))
+                    && p > 0.0
+                {
+                    ui.label(
+                        RichText::new(format!("≈ {:.4} sh", self.amount / p))
+                            .color(DIM)
+                            .monospace(),
+                    );
                 }
             }
         });
@@ -1292,41 +1390,60 @@ impl App {
         if self.order_type == OrderType::Limit {
             ui.horizontal(|ui| {
                 ui.label("Limit");
-                ui.add(egui::DragValue::new(&mut self.limit_price).speed(0.01).range(0.0..=1e9));
-                if ui.small_button("bid").clicked() {
-                    if let Some(b) = q.as_ref().and_then(|q| q.bid) {
-                        self.limit_price = b;
-                    }
+                ui.add(
+                    egui::DragValue::new(&mut self.limit_price)
+                        .speed(0.01)
+                        .range(0.0..=1e9),
+                );
+                if ui.small_button("bid").clicked()
+                    && let Some(b) = q.as_ref().and_then(|q| q.bid)
+                {
+                    self.limit_price = b;
                 }
-                if ui.small_button("mid").clicked() {
-                    if let Some(m) = q.as_ref().and_then(|q| q.mid) {
-                        self.limit_price = m;
-                    }
+                if ui.small_button("mid").clicked()
+                    && let Some(m) = q.as_ref().and_then(|q| q.mid)
+                {
+                    self.limit_price = m;
                 }
-                if ui.small_button("ask").clicked() {
-                    if let Some(a) = q.as_ref().and_then(|q| q.ask) {
-                        self.limit_price = a;
-                    }
+                if ui.small_button("ask").clicked()
+                    && let Some(a) = q.as_ref().and_then(|q| q.ask)
+                {
+                    self.limit_price = a;
                 }
             });
         }
         if self.order_type == OrderType::Stop {
             ui.horizontal(|ui| {
                 ui.label("Stop");
-                ui.add(egui::DragValue::new(&mut self.stop_price).speed(0.01).range(0.0..=1e9));
+                ui.add(
+                    egui::DragValue::new(&mut self.stop_price)
+                        .speed(0.01)
+                        .range(0.0..=1e9),
+                );
             });
         }
 
         ui.horizontal(|ui| {
             ui.label("Venue");
-            ui.add(egui::TextEdit::singleline(&mut self.venue).hint_text("default").desired_width(120.0));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.venue)
+                    .hint_text("default")
+                    .desired_width(120.0),
+            );
         });
 
         let pending = { self.io.state.lock().unwrap().preview_pending };
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let label = if self.side == Side::Buy { "Preview BUY" } else { "Preview SELL" };
-            if ui.add_enabled(!pending, egui::Button::new(RichText::new(label).strong())).clicked() {
+            let label = if self.side == Side::Buy {
+                "Preview BUY"
+            } else {
+                "Preview SELL"
+            };
+            if ui
+                .add_enabled(!pending, egui::Button::new(RichText::new(label).strong()))
+                .clicked()
+            {
                 self.confirm_typed.clear();
                 self.accept_unsuitable = false;
                 let _ = self.io.tx.send(Cmd::PreviewTrade(self.intent()));
@@ -1392,7 +1509,11 @@ impl App {
                 );
             });
             if !acct.valuation_ts.is_empty() {
-                ui.label(RichText::new(format!("valued {}", acct.valuation_ts)).color(DIM).small());
+                ui.label(
+                    RichText::new(format!("valued {}", acct.valuation_ts))
+                        .color(DIM)
+                        .small(),
+                );
             }
 
             ui.add_space(10.0);
@@ -1425,60 +1546,71 @@ impl App {
             ui.separator();
             ui.heading("Holdings");
             let total_sec = acct.securities.unwrap_or(0.0);
-            egui::ScrollArea::horizontal().id_salt("holdings_h").show(ui, |ui| {
-            TableBuilder::new(ui)
-                .striped(true)
-                .cell_layout(egui::Layout::right_to_left(egui::Align::Center))
-                .column(Column::exact(118.0))
-                .column(Column::initial(170.0).at_least(90.0).clip(true))
-                .column(Column::exact(62.0))
-                .column(Column::exact(56.0))
-                .column(Column::exact(74.0))
-                .column(Column::exact(74.0))
-                .column(Column::exact(80.0))
-                .column(Column::exact(86.0))
-                .column(Column::exact(70.0))
-                .header(20.0, |mut h| {
-                    for t in ["ISIN", "Name", "Weight", "Qty", "Avg", "Mid", "Value", "P&L", "P&L %"] {
-                        h.col(|ui| {
-                            ui.label(RichText::new(t).strong());
+            egui::ScrollArea::horizontal()
+                .id_salt("holdings_h")
+                .show(ui, |ui| {
+                    TableBuilder::new(ui)
+                        .striped(true)
+                        .cell_layout(egui::Layout::right_to_left(egui::Align::Center))
+                        .column(Column::exact(118.0))
+                        .column(Column::initial(170.0).at_least(90.0).clip(true))
+                        .column(Column::exact(62.0))
+                        .column(Column::exact(56.0))
+                        .column(Column::exact(74.0))
+                        .column(Column::exact(74.0))
+                        .column(Column::exact(80.0))
+                        .column(Column::exact(86.0))
+                        .column(Column::exact(70.0))
+                        .header(20.0, |mut h| {
+                            for t in [
+                                "ISIN", "Name", "Weight", "Qty", "Avg", "Mid", "Value", "P&L",
+                                "P&L %",
+                            ] {
+                                h.col(|ui| {
+                                    ui.label(RichText::new(t).strong());
+                                });
+                            }
+                        })
+                        .body(|body| {
+                            body.rows(20.0, holdings.len(), |mut row| {
+                                let h = &holdings[row.index()];
+                                row.col(|ui| {
+                                    ui.label(RichText::new(&h.isin).monospace());
+                                });
+                                row.col(|ui| {
+                                    ui.label(&h.name).on_hover_text(&h.security_type);
+                                });
+                                row.col(|ui| {
+                                    let w = if total_sec > 0.0 {
+                                        h.valuation.map(|v| v / total_sec * 100.0)
+                                    } else {
+                                        None
+                                    };
+                                    ui.label(RichText::new(num(w, 1)).color(BLUE).monospace());
+                                });
+                                row.col(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("{:.4}", h.quantity)).monospace(),
+                                    );
+                                });
+                                row.col(|ui| {
+                                    ui.label(RichText::new(num(h.fifo_price, 4)).monospace());
+                                });
+                                row.col(|ui| {
+                                    ui.label(RichText::new(num(h.mid, 4)).monospace());
+                                });
+                                row.col(|ui| {
+                                    ui.label(RichText::new(num(h.valuation, 2)).monospace());
+                                });
+                                row.col(|ui| {
+                                    ui.label(signed_text(h.unrealized(), 2, ""));
+                                });
+                                row.col(|ui| {
+                                    ui.label(signed_text(h.unrealized_pct(), 2, "%"));
+                                });
+                            });
                         });
-                    }
-                })
-                .body(|body| {
-                    body.rows(20.0, holdings.len(), |mut row| {
-                        let h = &holdings[row.index()];
-                        row.col(|ui| {
-                            ui.label(RichText::new(&h.isin).monospace());
-                        });
-                        row.col(|ui| {
-                            ui.label(&h.name).on_hover_text(&h.security_type);
-                        });
-                        row.col(|ui| {
-                            let w = if total_sec > 0.0 {
-                                h.valuation.map(|v| v / total_sec * 100.0)
-                            } else {
-                                None
-                            };
-                            ui.label(RichText::new(num(w, 1)).color(BLUE).monospace());
-                        });
-                        row.col(|ui| {
-                            ui.label(RichText::new(format!("{:.4}", h.quantity)).monospace());
-                        });
-                        row.col(|ui| {
-                            ui.label(RichText::new(num(h.fifo_price, 4)).monospace());
-                        });
-                        row.col(|ui| {
-                            ui.label(RichText::new(num(h.mid, 4)).monospace());
-                        });
-                        row.col(|ui| {
-                            ui.label(RichText::new(num(h.valuation, 2)).monospace());
-                        });
-                        row.col(|ui| { ui.label(signed_text(h.unrealized(), 2, "")); });
-                        row.col(|ui| { ui.label(signed_text(h.unrealized_pct(), 2, "%")); });
-                    });
                 });
-            });
 
             ui.add_space(10.0);
             ui.separator();
@@ -1515,8 +1647,16 @@ impl App {
                             _ => RED,
                         };
                         ui.label(RichText::new(format!("{kind:<12}")).monospace().color(DIM));
-                        ui.add(egui::ProgressBar::new(*score as f32).desired_width(220.0).fill(c));
-                        ui.label(RichText::new(format!("{held}/{max} · {state}")).color(DIM).small());
+                        ui.add(
+                            egui::ProgressBar::new(*score as f32)
+                                .desired_width(220.0)
+                                .fill(c),
+                        );
+                        ui.label(
+                            RichText::new(format!("{held}/{max} · {state}"))
+                                .color(DIM)
+                                .small(),
+                        );
                     });
                 }
             }
@@ -1525,24 +1665,30 @@ impl App {
                 ui.add_space(10.0);
                 ui.separator();
                 ui.heading("Stress scenarios");
-                ui.label(RichText::new("modelled move of your book vs its benchmark").color(DIM).small());
-                egui::Grid::new("scen").num_columns(3).spacing([20.0, 3.0]).show(ui, |ui| {
-                    ui.label(RichText::new("Scenario").strong());
-                    ui.label(RichText::new("Portfolio").strong());
-                    ui.label(RichText::new("Benchmark").strong());
-                    ui.end_row();
-                    for (name, port, bench) in &analytics.scenarios {
-                        ui.label(RichText::new(name.replace('_', " ")).color(DIM));
-                        ui.label(signed_text(Some(*port), 2, "%"));
-                        ui.label(signed_text(Some(*bench), 2, "%"));
+                ui.label(
+                    RichText::new("modelled move of your book vs its benchmark")
+                        .color(DIM)
+                        .small(),
+                );
+                egui::Grid::new("scen")
+                    .num_columns(3)
+                    .spacing([20.0, 3.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Scenario").strong());
+                        ui.label(RichText::new("Portfolio").strong());
+                        ui.label(RichText::new("Benchmark").strong());
                         ui.end_row();
-                    }
-                });
+                        for (name, port, bench) in &analytics.scenarios {
+                            ui.label(RichText::new(name.replace('_', " ")).color(DIM));
+                            ui.label(signed_text(Some(*port), 2, "%"));
+                            ui.label(signed_text(Some(*bench), 2, "%"));
+                            ui.end_row();
+                        }
+                    });
             }
             ui.add_space(20.0);
         });
     }
-
 
     /// Derivatives tradable on the selected underlying. Selecting a row makes
     /// the derivative the active instrument (ticket + chart) without re-pinning
@@ -1575,7 +1721,9 @@ impl App {
             }
         }
         let Some(underlying) = self.deriv_underlying.clone() else {
-            ui.label(RichText::new("select an instrument in the watchlist or portfolio").color(DIM));
+            ui.label(
+                RichText::new("select an instrument in the watchlist or portfolio").color(DIM),
+            );
             return;
         };
 
@@ -1670,7 +1818,18 @@ impl App {
             .column(Column::remainder().at_least(80.0))
             .column(Column::exact(24.0))
             .header(20.0, |mut h| {
-                for t in ["ISIN", "Issuer", "Product", "Lev", "Strike", "KO barrier", "Dist KO", "Premium", "Expiry", ""] {
+                for t in [
+                    "ISIN",
+                    "Issuer",
+                    "Product",
+                    "Lev",
+                    "Strike",
+                    "KO barrier",
+                    "Dist KO",
+                    "Premium",
+                    "Expiry",
+                    "",
+                ] {
                     h.col(|ui| {
                         if !t.is_empty() {
                             ui.label(RichText::new(t).strong());
@@ -1730,17 +1889,27 @@ impl App {
                         );
                     });
                     row.col(|ui| {
-                        ui.label(RichText::new(num(d.premium_pct.map(|x| x * 100.0), 2)).monospace());
-                    });
-                    row.col(|ui| {
                         ui.label(
-                            RichText::new(if d.open_end { "open end" } else { d.expiry.as_str() })
-                                .color(DIM)
-                                .small(),
+                            RichText::new(num(d.premium_pct.map(|x| x * 100.0), 2)).monospace(),
                         );
                     });
                     row.col(|ui| {
-                        if ui.small_button("+").on_hover_text("add to watchlist").clicked() {
+                        ui.label(
+                            RichText::new(if d.open_end {
+                                "open end"
+                            } else {
+                                d.expiry.as_str()
+                            })
+                            .color(DIM)
+                            .small(),
+                        );
+                    });
+                    row.col(|ui| {
+                        if ui
+                            .small_button("+")
+                            .on_hover_text("add to watchlist")
+                            .clicked()
+                        {
                             watch = Some(d.isin.clone());
                         }
                     });
@@ -1783,12 +1952,17 @@ impl App {
                         .prefix("~")
                         .suffix(" bars"),
                 )
-                .on_hover_text("target bar count; the bucket snaps to the nearest standard interval");
+                .on_hover_text(
+                    "target bar count; the bucket snaps to the nearest standard interval",
+                );
             }
-            if ui.small_button("reload").on_hover_text("bypass the chart cache").clicked() {
-                if let Some(isin) = self.selected.clone() {
-                    self.load_chart(isin, true);
-                }
+            if ui
+                .small_button("reload")
+                .on_hover_text("bypass the chart cache")
+                .clicked()
+                && let Some(isin) = self.selected.clone()
+            {
+                self.load_chart(isin, true);
             }
             if !chart.source.is_empty() {
                 ui.label(
@@ -1843,7 +2017,11 @@ impl App {
 
         let (err, loading, backoff) = {
             let s = self.io.state.lock().unwrap();
-            (s.chart_error.clone(), s.chart_loading, s.backoff_secs_left())
+            (
+                s.chart_error.clone(),
+                s.chart_loading,
+                s.backoff_secs_left(),
+            )
         };
         if let Some(left) = backoff {
             ui.label(
@@ -1864,7 +2042,9 @@ impl App {
             if let Some(e) = err {
                 ui.label(RichText::new(e).color(RED));
             } else if !loading {
-                ui.label(RichText::new("no chart data — pick an instrument on the left").color(DIM));
+                ui.label(
+                    RichText::new("no chart data — pick an instrument on the left").color(DIM),
+                );
             }
             return;
         }
@@ -1880,16 +2060,25 @@ impl App {
         let colour = if up { GREEN } else { RED };
 
         ui.horizontal(|ui| {
-            ui.label(RichText::new(num(last, 4)).monospace().size(20.0).color(colour));
-            if let (Some(l), Some(r)) = (last, chart.reference) {
-                if r.abs() > 1e-9 {
-                    ui.label(signed_text(Some(l - r), 4, ""));
-                    ui.label(signed_text(Some((l / r - 1.0) * 100.0), 2, "%"));
-                }
+            ui.label(
+                RichText::new(num(last, 4))
+                    .monospace()
+                    .size(20.0)
+                    .color(colour),
+            );
+            if let (Some(l), Some(r)) = (last, chart.reference)
+                && r.abs() > 1e-9
+            {
+                ui.label(signed_text(Some(l - r), 4, ""));
+                ui.label(signed_text(Some((l / r - 1.0) * 100.0), 2, "%"));
             }
             if let Some(r) = chart.reference {
-                ui.label(RichText::new(format!("prev close {r:.4}")).color(DIM).monospace())
-                    .on_hover_text(&chart.reference_ts);
+                ui.label(
+                    RichText::new(format!("prev close {r:.4}"))
+                        .color(DIM)
+                        .monospace(),
+                )
+                .on_hover_text(&chart.reference_ts);
             }
             if let Some(p) = chart.points.last() {
                 ui.label(RichText::new(&p.ts).color(DIM).small());
@@ -1924,7 +2113,7 @@ impl App {
             .legend(egui_plot::Legend::default())
             .show_axes([true, true])
             .x_axis_formatter(move |mark, _| axis_time(mark.value, span_secs))
-                        .label_formatter(|pos| {
+            .label_formatter(|pos| {
                 let p = match pos {
                     egui_plot::HoverPosition::NearDataPoint { position, .. } => position,
                     egui_plot::HoverPosition::Elsewhere { position } => position,
@@ -1944,7 +2133,11 @@ impl App {
                     // needless work and clutters the legend.
                     let body = bucket * 0.62;
                     let elem = |c: &Candle| {
-                        let (lo, hi) = if c.up() { (c.open, c.close) } else { (c.close, c.open) };
+                        let (lo, hi) = if c.up() {
+                            (c.open, c.close)
+                        } else {
+                            (c.close, c.open)
+                        };
                         egui_plot::BoxElem::new(
                             c.t + bucket / 2.0,
                             egui_plot::BoxSpread::new(c.low, lo, c.close, hi, c.high),
@@ -2002,7 +2195,11 @@ impl App {
                             .monospace()
                             .color(if e.ms > 1500 { AMBER } else { DIM }),
                     );
-                    ui.label(RichText::new(&e.cmd).monospace().color(if e.ok { GREEN } else { RED }));
+                    ui.label(RichText::new(&e.cmd).monospace().color(if e.ok {
+                        GREEN
+                    } else {
+                        RED
+                    }));
                     ui.label(RichText::new(&e.detail).color(DIM).small());
                 });
             }
@@ -2018,7 +2215,12 @@ impl App {
                 .and_then(|i| s.quotes.get(i))
                 .map(|q| q.raw.clone())
                 .unwrap_or(serde_json::Value::Null);
-            (s.overview_raw.clone(), s.holdings_raw.clone(), s.chart_raw.clone(), q)
+            (
+                s.overview_raw.clone(),
+                s.holdings_raw.clone(),
+                s.chart_raw.clone(),
+                q,
+            )
         };
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (name, v) in [
@@ -2063,43 +2265,64 @@ impl App {
                 };
                 ui.horizontal(|ui| {
                     ui.label(side_txt);
-                    ui.label(RichText::new(self.selected.clone().unwrap_or_default()).monospace().strong());
+                    ui.label(
+                        RichText::new(self.selected.clone().unwrap_or_default())
+                            .monospace()
+                            .strong(),
+                    );
                     ui.label(RichText::new(self.order_type.cmd()).color(DIM));
                 });
                 ui.separator();
 
-                egui::Grid::new("pv").num_columns(2).spacing([20.0, 3.0]).show(ui, |ui| {
-                    let row = |ui: &mut egui::Ui, k: &str, v: String| {
-                        ui.label(RichText::new(k).color(DIM));
-                        ui.label(RichText::new(v).monospace());
-                        ui.end_row();
-                    };
-                    row(ui, "Shares", num(p.shares, 6));
-                    row(ui, "Est. volume", format!("{} {}", num(p.est_volume, 2), p.currency));
-                    row(ui, "Bid / Ask", format!("{} / {}", num(p.bid, 4), num(p.ask, 4)));
-                    row(ui, "Mid", num(p.mid, 4));
-                    row(ui, "Spread", format!("{} bps", num(p.spread_bps(), 1)));
-                    row(ui, "Quote time", p.quote_ts.clone());
-                    row(ui, "Venue", format!("{} ({})", p.venue, p.venue_status));
-                    row(ui, "Tradable", p.tradable.to_string());
-                    row(ui, "Entry cost", format!("{} ({}%)", num(p.entry_cost, 2), num(p.entry_cost_pct, 3)));
-                    row(ui, "Ongoing cost", num(p.ongoing_cost, 2));
-                    row(ui, "Exit cost", num(p.exit_cost, 2));
-                    row(ui, "Suitability", p.suitability_status.clone());
-                    row(ui, "Confirmation id", p.confirmation_id.clone());
-                    row(
-                        ui,
-                        "Valid for",
-                        match p.seconds_left() {
-                            Some(s) if s > 0 => format!("{s} s"),
-                            Some(_) => "EXPIRED".into(),
-                            None => "—".into(),
-                        },
-                    );
-                });
+                egui::Grid::new("pv")
+                    .num_columns(2)
+                    .spacing([20.0, 3.0])
+                    .show(ui, |ui| {
+                        let row = |ui: &mut egui::Ui, k: &str, v: String| {
+                            ui.label(RichText::new(k).color(DIM));
+                            ui.label(RichText::new(v).monospace());
+                            ui.end_row();
+                        };
+                        row(ui, "Shares", num(p.shares, 6));
+                        row(
+                            ui,
+                            "Est. volume",
+                            format!("{} {}", num(p.est_volume, 2), p.currency),
+                        );
+                        row(
+                            ui,
+                            "Bid / Ask",
+                            format!("{} / {}", num(p.bid, 4), num(p.ask, 4)),
+                        );
+                        row(ui, "Mid", num(p.mid, 4));
+                        row(ui, "Spread", format!("{} bps", num(p.spread_bps(), 1)));
+                        row(ui, "Quote time", p.quote_ts.clone());
+                        row(ui, "Venue", format!("{} ({})", p.venue, p.venue_status));
+                        row(ui, "Tradable", p.tradable.to_string());
+                        row(
+                            ui,
+                            "Entry cost",
+                            format!("{} ({}%)", num(p.entry_cost, 2), num(p.entry_cost_pct, 3)),
+                        );
+                        row(ui, "Ongoing cost", num(p.ongoing_cost, 2));
+                        row(ui, "Exit cost", num(p.exit_cost, 2));
+                        row(ui, "Suitability", p.suitability_status.clone());
+                        row(ui, "Confirmation id", p.confirmation_id.clone());
+                        row(
+                            ui,
+                            "Valid for",
+                            match p.seconds_left() {
+                                Some(s) if s > 0 => format!("{s} s"),
+                                Some(_) => "EXPIRED".into(),
+                                None => "—".into(),
+                            },
+                        );
+                    });
 
                 if p.quote_outdated {
-                    ui.label(RichText::new("⚠ quote is flagged outdated by the broker").color(AMBER));
+                    ui.label(
+                        RichText::new("⚠ quote is flagged outdated by the broker").color(AMBER),
+                    );
                 }
                 if !p.warning_title.is_empty() {
                     ui.separator();
@@ -2109,14 +2332,17 @@ impl App {
                 if p.requires_accept_unsuitable {
                     ui.checkbox(
                         &mut self.accept_unsuitable,
-                        RichText::new("Instrument marked unsuitable — accept and proceed").color(AMBER),
+                        RichText::new("Instrument marked unsuitable — accept and proceed")
+                            .color(AMBER),
                     );
                 }
 
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Type CONFIRM to arm:");
-                    ui.add(egui::TextEdit::singleline(&mut self.confirm_typed).desired_width(120.0));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.confirm_typed).desired_width(120.0),
+                    );
                 });
 
                 let armed = self.confirm_typed.trim().eq_ignore_ascii_case("confirm")
@@ -2127,7 +2353,10 @@ impl App {
 
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(armed && !pending, egui::Button::new(RichText::new("SUBMIT").strong()))
+                        .add_enabled(
+                            armed && !pending,
+                            egui::Button::new(RichText::new("SUBMIT").strong()),
+                        )
                         .clicked()
                     {
                         submit = true;
@@ -2148,13 +2377,15 @@ impl App {
 
                 ui.collapsing("raw phase-1 payload", |ui| {
                     let txt = serde_json::to_string_pretty(&p.raw).unwrap_or_default();
-                    egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut txt.as_str())
-                                .code_editor()
-                                .desired_width(f32::INFINITY),
-                        );
-                    });
+                    egui::ScrollArea::vertical()
+                        .max_height(260.0)
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut txt.as_str())
+                                    .code_editor()
+                                    .desired_width(f32::INFINITY),
+                            );
+                        });
                 });
 
                 let s = self.io.state.lock().unwrap();
@@ -2181,14 +2412,22 @@ impl App {
 fn alloc_bar(ui: &mut egui::Ui, name: &str, weight: f64, valuation: f64, depth: usize) {
     ui.horizontal(|ui| {
         ui.add_space(depth as f32 * 16.0);
-        ui.label(RichText::new(format!("{name:<18}")).monospace().color(if depth > 0 { DIM } else { Color32::GRAY }));
+        ui.label(
+            RichText::new(format!("{name:<18}"))
+                .monospace()
+                .color(if depth > 0 { DIM } else { Color32::GRAY }),
+        );
         ui.add(
             egui::ProgressBar::new(weight as f32)
                 .desired_width(200.0)
                 .fill(if depth > 0 { DIM } else { BLUE }),
         );
         ui.label(RichText::new(format!("{:>5.1}%", weight * 100.0)).monospace());
-        ui.label(RichText::new(format!("{valuation:>9.2}")).monospace().color(DIM));
+        ui.label(
+            RichText::new(format!("{valuation:>9.2}"))
+                .monospace()
+                .color(DIM),
+        );
     });
 }
 
@@ -2233,7 +2472,11 @@ fn hhmm(t: f64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", rem / 3600, (rem % 3600) / 60)
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}",
+        rem / 3600,
+        (rem % 3600) / 60
+    )
 }
 
 fn civil_from_days(z: i64) -> (i64, i64, i64) {

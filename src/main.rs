@@ -14,27 +14,27 @@ fn main() -> eframe::Result<()> {
     // exits. Used to verify what the UI actually renders; the app cannot be
     // focused from a script.
     let argv: Vec<String> = std::env::args().collect();
-    let shot = argv.iter().position(|a| a == "--screenshot").map(|i| app::Shot {
-        path: argv
-            .get(i + 1)
-            .cloned()
-            .unwrap_or_else(|| "shot.png".into())
-            .into(),
-        warmup_secs: argv
-            .get(i + 2)
-            .and_then(|f| f.parse().ok())
-            .unwrap_or(6.0),
-        tab: argv
-            .iter()
-            .position(|a| a == "--tab")
-            .and_then(|i| argv.get(i + 1))
-            .cloned(),
-        select: argv
-            .iter()
-            .position(|a| a == "--select")
-            .and_then(|i| argv.get(i + 1))
-            .cloned(),
-    });
+    let shot = argv
+        .iter()
+        .position(|a| a == "--screenshot")
+        .map(|i| app::Shot {
+            path: argv
+                .get(i + 1)
+                .cloned()
+                .unwrap_or_else(|| "shot.png".into())
+                .into(),
+            warmup_secs: argv.get(i + 2).and_then(|f| f.parse().ok()).unwrap_or(6.0),
+            tab: argv
+                .iter()
+                .position(|a| a == "--tab")
+                .and_then(|i| argv.get(i + 1))
+                .cloned(),
+            select: argv
+                .iter()
+                .position(|a| a == "--select")
+                .and_then(|i| argv.get(i + 1))
+                .cloned(),
+        });
 
     // `--redact` hides the account holder's name, for screenshots and sharing.
     let redact = argv.iter().any(|a| a == "--redact");

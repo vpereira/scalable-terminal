@@ -29,8 +29,14 @@ const CHART_YTD: &str = include_str!("../tests/fixtures/chart-ytd.json");
 
 #[test]
 fn iso8601_matches_unix_epoch() {
-    assert_eq!(parse_iso8601("2026-09-16T05:30:07.000Z"), Some(1_789_536_607.0));
-    assert_eq!(parse_iso8601("2026-09-17T18:14:28.000Z"), Some(1_789_668_868.0));
+    assert_eq!(
+        parse_iso8601("2026-09-16T05:30:07.000Z"),
+        Some(1_789_536_607.0)
+    );
+    assert_eq!(
+        parse_iso8601("2026-09-17T18:14:28.000Z"),
+        Some(1_789_668_868.0)
+    );
     assert!(parse_iso8601("").is_none());
     assert!(parse_iso8601("garbage").is_none());
 }
@@ -84,7 +90,10 @@ fn holdings_carry_cost_basis_and_pnl() {
     let hs = Holding::list_from(sc::result(&envelope(HOLDINGS)));
     assert_eq!(hs.len(), 3);
 
-    let h = hs.iter().find(|h| h.isin == "CA53056H1047").expect("Liberty Gold");
+    let h = hs
+        .iter()
+        .find(|h| h.isin == "CA53056H1047")
+        .expect("Liberty Gold");
     assert_eq!(h.name, "Liberty Gold");
     assert!(close(h.quantity, 10.0));
     assert!(close(h.fifo_price.unwrap(), 1.238));
@@ -95,7 +104,10 @@ fn holdings_carry_cost_basis_and_pnl() {
     assert_eq!(h.currency, "EUR");
 
     // Every position must price, or the portfolio total is a lie.
-    assert!(hs.iter().all(|h| h.valuation.is_some() && h.fifo_price.is_some()));
+    assert!(
+        hs.iter()
+            .all(|h| h.valuation.is_some() && h.fifo_price.is_some())
+    );
 }
 
 #[test]
@@ -131,7 +143,10 @@ fn working_orders_come_from_pending_transactions() {
     assert!(os.iter().all(|o| o.side == "SELL"));
     assert!(os.iter().all(|o| !o.id.is_empty()));
 
-    let o = os.iter().find(|o| o.isin == "CA53056H1047").expect("Liberty Gold sell");
+    let o = os
+        .iter()
+        .find(|o| o.isin == "CA53056H1047")
+        .expect("Liberty Gold sell");
     assert!(close(o.limit_price.unwrap(), 1.42));
     assert!(close(o.quantity.unwrap(), 10.0));
     assert_eq!(o.description, "Liberty Gold");
@@ -173,8 +188,15 @@ fn analytics_extracts_allocations_health_and_scenarios() {
     assert!(kinds.contains(&"EQUITY_SECTOR"));
     assert!(kinds.contains(&"REGION"));
 
-    let (_, product) = a.allocations.iter().find(|(k, _)| k == "PRODUCT_TYPE").unwrap();
-    let cash = product.iter().find(|s| s.name == "cash").expect("cash slice");
+    let (_, product) = a
+        .allocations
+        .iter()
+        .find(|(k, _)| k == "PRODUCT_TYPE")
+        .unwrap();
+    let cash = product
+        .iter()
+        .find(|s| s.name == "cash")
+        .expect("cash slice");
     assert!(close(cash.valuation, 293.37));
     assert!((cash.weight - 0.8118272131).abs() < 1e-9);
     // Weights within a group sum to 1.
@@ -186,12 +208,26 @@ fn analytics_extracts_allocations_health_and_scenarios() {
     assert!(region.iter().any(|s| !s.subs.is_empty()));
 
     assert_eq!(a.health.len(), 3);
-    assert!(a.health.iter().all(|(_, score, ..)| (0.0..=1.0).contains(score)));
+    assert!(
+        a.health
+            .iter()
+            .all(|(_, score, ..)| (0.0..=1.0).contains(score))
+    );
 
     assert_eq!(a.scenarios.len(), 5);
-    let world = a.scenarios.iter().find(|(t, ..)| t == "WORLD_DOWN").unwrap();
-    assert!((world.1 - -0.73).abs() < 1e-6, "portfolio performance scaled to percent");
-    assert!((world.2 - -5.42).abs() < 1e-6, "benchmark performance scaled to percent");
+    let world = a
+        .scenarios
+        .iter()
+        .find(|(t, ..)| t == "WORLD_DOWN")
+        .unwrap();
+    assert!(
+        (world.1 - -0.73).abs() < 1e-6,
+        "portfolio performance scaled to percent"
+    );
+    assert!(
+        (world.2 - -5.42).abs() < 1e-6,
+        "benchmark performance scaled to percent"
+    );
 }
 
 /// The 1d fixture is intraday: 69 ticks inside a single session. No multi-day
@@ -204,7 +240,10 @@ fn sma_requires_the_series_to_cover_the_window() {
     assert!(c.span_days() < 2.0, "1d fixture spans under two days");
     for days in [20.0, 50.0, 200.0] {
         assert!(!c.supports_sma(days));
-        assert!(c.sma_days(days).is_empty(), "{days}-day SMA must not be drawn");
+        assert!(
+            c.sma_days(days).is_empty(),
+            "{days}-day SMA must not be drawn"
+        );
     }
     assert!(c.sma_days(0.0).is_empty());
 }
@@ -235,7 +274,10 @@ fn sma_days_matches_a_direct_trailing_mean() {
             .collect();
         assert!(!members.is_empty());
         let mean = members.iter().sum::<f64>() / members.len() as f64;
-        assert!((v - mean).abs() < 1e-9, "at t={t}: rolling {v} vs direct {mean}");
+        assert!(
+            (v - mean).abs() < 1e-9,
+            "at t={t}: rolling {v} vs direct {mean}"
+        );
     }
 
     // An average is bounded by the series it averages.
@@ -253,8 +295,16 @@ fn long_timeframe_supports_all_three_classic_averages() {
     let c = Chart::from_json(sc::result(&data));
 
     assert_eq!(c.timeframe, "ytd");
-    assert!(c.points.len() < 200, "endpoint downsamples: {} points", c.points.len());
-    assert!(c.span_days() > 200.0, "but it still spans {:.0} days", c.span_days());
+    assert!(
+        c.points.len() < 200,
+        "endpoint downsamples: {} points",
+        c.points.len()
+    );
+    assert!(
+        c.span_days() > 200.0,
+        "but it still spans {:.0} days",
+        c.span_days()
+    );
 
     for days in [20.0, 50.0, 200.0] {
         assert!(c.supports_sma(days), "{days}-day window fits in the span");
@@ -267,7 +317,10 @@ fn long_timeframe_supports_all_three_classic_averages() {
 
     // Daily bars here, so a 20-day window really is about 20 observations.
     let n = c.points_per_window(20.0).unwrap();
-    assert!((10.0..40.0).contains(&n), "expected ~daily resolution, got {n}");
+    assert!(
+        (10.0..40.0).contains(&n),
+        "expected ~daily resolution, got {n}"
+    );
 
     // A window past the span still refuses.
     assert!(!c.supports_sma(500.0));
@@ -282,7 +335,10 @@ fn spacing_and_window_resolution_are_reported() {
     let c = Chart::from_json(sc::result(&data));
 
     let gap = c.median_spacing_secs().expect("spacing");
-    assert!(gap > 0.0 && gap < 3600.0, "1d fixture is intraday, got {gap}s");
+    assert!(
+        gap > 0.0 && gap < 3600.0,
+        "1d fixture is intraday, got {gap}s"
+    );
 
     let n = c.points_per_window(1.0).expect("resolution");
     assert!(n > 1.0, "a one-day window holds many intraday ticks");
@@ -364,7 +420,11 @@ fn free_quantity_subtracts_resting_sells() {
     let working = PendingOrder::pending_from_transactions(sc::result(&tx));
 
     // The broker itself reports nothing blocked.
-    assert!(holdings.iter().all(|h| h.blocked == 0.0 && h.pending == 0.0));
+    assert!(
+        holdings
+            .iter()
+            .all(|h| h.blocked == 0.0 && h.pending == 0.0)
+    );
 
     for h in &holdings {
         assert!(
@@ -423,7 +483,10 @@ fn candles_aggregate_ticks_into_valid_ohlc() {
     let bucket = 900.0; // 15 minutes
     let bars = c.candles(bucket);
     assert!(!bars.is_empty());
-    assert!(bars.len() <= c.points.len(), "aggregation cannot invent bars");
+    assert!(
+        bars.len() <= c.points.len(),
+        "aggregation cannot invent bars"
+    );
 
     // Every tick lands in exactly one bar.
     assert_eq!(bars.iter().map(|b| b.ticks).sum::<usize>(), c.points.len());
@@ -440,13 +503,25 @@ fn candles_aggregate_ticks_into_valid_ohlc() {
     assert!(bars.windows(2).all(|w| w[1].t > w[0].t));
 
     // The series endpoints survive aggregation.
-    assert!(close(bars.first().unwrap().open, c.points.first().unwrap().mid));
-    assert!(close(bars.last().unwrap().close, c.points.last().unwrap().mid));
+    assert!(close(
+        bars.first().unwrap().open,
+        c.points.first().unwrap().mid
+    ));
+    assert!(close(
+        bars.last().unwrap().close,
+        c.points.last().unwrap().mid
+    ));
 
     let lo = c.points.iter().map(|p| p.mid).fold(f64::MAX, f64::min);
     let hi = c.points.iter().map(|p| p.mid).fold(f64::MIN, f64::max);
-    assert!(close(bars.iter().map(|b| b.low).fold(f64::MAX, f64::min), lo));
-    assert!(close(bars.iter().map(|b| b.high).fold(f64::MIN, f64::max), hi));
+    assert!(close(
+        bars.iter().map(|b| b.low).fold(f64::MAX, f64::min),
+        lo
+    ));
+    assert!(close(
+        bars.iter().map(|b| b.high).fold(f64::MIN, f64::max),
+        hi
+    ));
 }
 
 /// A bucket wide enough to hold everything collapses to a single bar; a
@@ -500,10 +575,16 @@ fn backoff_reports_itself_clear_once_it_lapses() {
 
     s.backoff_until = Some(Instant::now() + Duration::from_secs(90));
     let left = s.backoff_secs_left().expect("held off");
-    assert!((80..=91).contains(&left), "countdown reports ~90s, got {left}");
+    assert!(
+        (80..=91).contains(&left),
+        "countdown reports ~90s, got {left}"
+    );
 
     s.backoff_until = Some(Instant::now() - Duration::from_secs(1));
-    assert!(s.backoff_secs_left().is_none(), "a lapsed hold must read clear");
+    assert!(
+        s.backoff_secs_left().is_none(),
+        "a lapsed hold must read clear"
+    );
 
     // The measured recovery on this backend was 46s; the constant must exceed it.
     assert!(crate::worker::RATE_LIMIT_BACKOFF >= Duration::from_secs(60));
@@ -521,7 +602,13 @@ fn rate_limited_is_classified_separately() {
         ScErrorKind::Validation,
         ScErrorKind::Generic,
     ];
-    assert_eq!(kinds.iter().filter(|k| **k == ScErrorKind::RateLimited).count(), 1);
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| **k == ScErrorKind::RateLimited)
+            .count(),
+        1
+    );
     assert_ne!(ScErrorKind::RateLimited, ScErrorKind::Network);
     assert_ne!(ScErrorKind::RateLimited, ScErrorKind::Generic);
 }
@@ -551,7 +638,11 @@ fn derivatives_page_extracts_risk_metrics() {
     assert_eq!(p.items.len(), 5);
     assert_eq!(p.total_available, 8223);
 
-    let d = p.items.iter().find(|d| d.isin == "DE000CJ8P2E4").expect("SocGen mini");
+    let d = p
+        .items
+        .iter()
+        .find(|d| d.isin == "DE000CJ8P2E4")
+        .expect("SocGen mini");
     assert_eq!(d.issuer, "SOC_GEN");
     assert_eq!(d.strategy, "LONG");
     assert_eq!(d.subcategory, "MINI_FUTURE");
@@ -562,7 +653,10 @@ fn derivatives_page_extracts_risk_metrics() {
     assert!(close(d.distance_to_knockout.unwrap(), 0.9875));
     assert!(close(d.premium_pct.unwrap(), -0.0001));
     assert!(d.open_end);
-    assert!(d.expiry.is_empty(), "open-end products have a null expiry_date");
+    assert!(
+        d.expiry.is_empty(),
+        "open-end products have a null expiry_date"
+    );
     assert!(d.factor.is_none(), "knockouts carry leverage, not a factor");
 
     // Rows without an ISIN would be untradable — none may survive extraction.
@@ -642,7 +736,13 @@ fn trail_only_moves_for_a_worthwhile_improvement() {
 /// A misconfigured trail must produce no suggestion rather than a nonsense one.
 #[test]
 fn trail_rejects_impossible_distances() {
-    for (d, pct) in [(0.0, true), (-0.05, true), (1.0, true), (1.5, true), (0.0, false)] {
+    for (d, pct) in [
+        (0.0, true),
+        (-0.05, true),
+        (1.0, true),
+        (1.5, true),
+        (0.0, false),
+    ] {
         let t = Trail::new("X", d, pct, 100.0);
         assert!(!t.valid(), "distance {d} percent {pct} must be rejected");
         assert!(t.suggested_stop().is_none());
@@ -779,6 +879,10 @@ fn no_shortcut_can_place_an_order() {
 
     // And the omission is documented rather than accidental.
     assert!(UNBOUND.iter().any(|(what, _)| what.contains("Submit")));
-    assert!(UNBOUND.iter().any(|(what, _)| what.contains("trailing stop")));
+    assert!(
+        UNBOUND
+            .iter()
+            .any(|(what, _)| what.contains("trailing stop"))
+    );
     assert!(UNBOUND.iter().all(|(_, why)| !why.is_empty()));
 }

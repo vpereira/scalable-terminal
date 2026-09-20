@@ -23,16 +23,34 @@ pub enum Cmd {
     RefreshQuotes,
     WatchlistAdd(String),
     WatchlistRemove(String),
-    LoadChart { isin: String, timeframe: String, force: bool },
-    LoadDerivatives { underlying: String, dtype: String, strategy: String },
-    ArmTrail { isin: String, distance: f64, percent: bool },
+    LoadChart {
+        isin: String,
+        timeframe: String,
+        force: bool,
+    },
+    LoadDerivatives {
+        underlying: String,
+        dtype: String,
+        strategy: String,
+    },
+    ArmTrail {
+        isin: String,
+        distance: f64,
+        percent: bool,
+    },
     DisarmTrail(String),
     /// Cancel the resting stop and preview a replacement higher up. Phase two is
     /// left to the confirm dialog: this never places an order on its own.
-    RatchetTrail { isin: String },
+    RatchetTrail {
+        isin: String,
+    },
     Search(String),
     PreviewTrade(TradeIntent),
-    SubmitTrade { intent: TradeIntent, confirmation_id: String, accept_unsuitable: bool },
+    SubmitTrade {
+        intent: TradeIntent,
+        confirmation_id: String,
+        accept_unsuitable: bool,
+    },
     CancelOrder(String),
     ClearPreview,
     Shutdown,
@@ -73,11 +91,11 @@ impl TradeIntent {
             a.push("--stop-price".into());
             a.push(fmt_num(p));
         }
-        if let Some(v) = &self.venue {
-            if !v.trim().is_empty() {
-                a.push("--venue".into());
-                a.push(v.clone());
-            }
+        if let Some(v) = &self.venue
+            && !v.trim().is_empty()
+        {
+            a.push("--venue".into());
+            a.push(v.clone());
         }
         if let Some(id) = confirm {
             a.push("--confirm".into());
@@ -157,9 +175,7 @@ impl Shared {
         self.orders
             .iter()
             .find(|o| {
-                o.isin == isin
-                    && o.side.eq_ignore_ascii_case("SELL")
-                    && o.stop_price.is_some()
+                o.isin == isin && o.side.eq_ignore_ascii_case("SELL") && o.stop_price.is_some()
             })
             .cloned()
     }
@@ -183,7 +199,12 @@ impl Shared {
     }
 
     fn push_log(&mut self, cmd: &str, ms: u128, ok: bool, detail: impl Into<String>) {
-        self.log.push(CallLog { cmd: cmd.to_string(), ms, ok, detail: detail.into() });
+        self.log.push(CallLog {
+            cmd: cmd.to_string(),
+            ms,
+            ok,
+            detail: detail.into(),
+        });
         if self.log.len() > 400 {
             let drop = self.log.len() - 400;
             self.log.drain(0..drop);
@@ -264,7 +285,11 @@ fn worker_loop(
                 }
             }
             next_poll = Instant::now()
-                + if interval > Duration::ZERO { interval } else { Duration::from_secs(3600) };
+                + if interval > Duration::ZERO {
+                    interval
+                } else {
+                    Duration::from_secs(3600)
+                };
         }
     }
 }
@@ -313,7 +338,9 @@ fn handle(state: &Arc<Mutex<Shared>>, cmd: Cmd) {
                 let mut s = state.lock().unwrap();
                 let held = s.holdings.iter().any(|h| h.isin == isin);
                 s.watchlist_error = Some(if held {
-                    format!("{isin} is a position you hold; Scalable will not watchlist it. It is in Positions.")
+                    format!(
+                        "{isin} is a position you hold; Scalable will not watchlist it. It is in Positions."
+                    )
                 } else {
                     format!("{isin} was declined by the broker")
                 });
@@ -329,15 +356,26 @@ fn handle(state: &Arc<Mutex<Shared>>, cmd: Cmd) {
             log_call(state, "watchlist.remove", &call, &isin);
             refresh_watchlist(state);
         }
-        Cmd::LoadChart { isin, timeframe, force } => load_chart(state, &isin, &timeframe, force),
-        Cmd::LoadDerivatives { underlying, dtype, strategy } => {
-            load_derivatives(state, &underlying, &dtype, &strategy)
-        }
-        Cmd::ArmTrail { isin, distance, percent } => {
+        Cmd::LoadChart {
+            isin,
+            timeframe,
+            force,
+        } => load_chart(state, &isin, &timeframe, force),
+        Cmd::LoadDerivatives {
+            underlying,
+            dtype,
+            strategy,
+        } => load_derivatives(state, &underlying, &dtype, &strategy),
+        Cmd::ArmTrail {
+            isin,
+            distance,
+            percent,
+        } => {
             let mut s = state.lock().unwrap();
             let mid = s.quotes.get(&isin).and_then(|q| q.mid).unwrap_or(0.0);
             s.trails.retain(|t| t.isin != isin);
-            s.trails.push(Trail::new(isin.clone(), distance, percent, mid));
+            s.trails
+                .push(Trail::new(isin.clone(), distance, percent, mid));
             s.trail_error = None;
             s.push_log("trail.arm", 0, true, format!("{isin} at {mid}"));
             let trails = s.trails.clone();
@@ -355,7 +393,11 @@ fn handle(state: &Arc<Mutex<Shared>>, cmd: Cmd) {
         Cmd::RatchetTrail { isin } => ratchet_trail(state, &isin),
         Cmd::Search(q) => do_search(state, &q),
         Cmd::PreviewTrade(intent) => do_preview(state, &intent),
-        Cmd::SubmitTrade { intent, confirmation_id, accept_unsuitable } => {
+        Cmd::SubmitTrade {
+            intent,
+            confirmation_id,
+            accept_unsuitable,
+        } => {
             do_submit(state, &intent, &confirmation_id, accept_unsuitable);
             refresh_account(state);
         }
@@ -386,7 +428,12 @@ fn log_call(state: &Arc<Mutex<Shared>>, name: &str, call: &sc::Call, ctxinfo: &s
     let mut s = state.lock().unwrap();
     match &call.data {
         Ok(_) => s.push_log(name, call.elapsed.as_millis(), true, ctxinfo.to_string()),
-        Err(e) => s.push_log(name, call.elapsed.as_millis(), false, format!("{ctxinfo}: {e}")),
+        Err(e) => s.push_log(
+            name,
+            call.elapsed.as_millis(),
+            false,
+            format!("{ctxinfo}: {e}"),
+        ),
     }
 }
 
@@ -396,10 +443,16 @@ fn check_session(state: &Arc<Mutex<Shared>>) {
     match &call.data {
         Ok(v) => {
             let r = sc::result(v);
-            let first = sc::str_at(r, &["personOverview/personalDetails/firstName"]).unwrap_or_default();
-            let last = sc::str_at(r, &["personOverview/personalDetails/lastName"]).unwrap_or_default();
+            let first =
+                sc::str_at(r, &["personOverview/personalDetails/firstName"]).unwrap_or_default();
+            let last =
+                sc::str_at(r, &["personOverview/personalDetails/lastName"]).unwrap_or_default();
             let name = format!("{first} {last}").trim().to_string();
-            s.session = Some(if name.is_empty() { "authenticated".into() } else { name });
+            s.session = Some(if name.is_empty() {
+                "authenticated".into()
+            } else {
+                name
+            });
             s.session_error = None;
             s.push_log("whoami", call.elapsed.as_millis(), true, "session ok");
         }
@@ -445,7 +498,10 @@ fn refresh_account(state: &Arc<Mutex<Shared>>) {
         an = e.join().ok();
     });
     let (Some(ov), Some(cash), Some(hd), Some(tx), Some(an)) = (ov, cash, hd, tx, an) else {
-        state.lock().unwrap().push_log("refresh", 0, false, "an sc call panicked");
+        state
+            .lock()
+            .unwrap()
+            .push_log("refresh", 0, false, "an sc call panicked");
         return;
     };
 
@@ -457,45 +513,80 @@ fn refresh_account(state: &Arc<Mutex<Shared>>) {
             s.overview_raw = v.clone();
             s.push_log("broker.overview", ov.elapsed.as_millis(), true, "");
         }
-        Err(e) => s.push_log("broker.overview", ov.elapsed.as_millis(), false, e.to_string()),
+        Err(e) => s.push_log(
+            "broker.overview",
+            ov.elapsed.as_millis(),
+            false,
+            e.to_string(),
+        ),
     }
     match &cash.data {
         Ok(v) => {
             s.account.apply_cash(sc::result(v));
             s.push_log("broker.cash-breakdown", cash.elapsed.as_millis(), true, "");
         }
-        Err(e) => s.push_log("broker.cash-breakdown", cash.elapsed.as_millis(), false, e.to_string()),
+        Err(e) => s.push_log(
+            "broker.cash-breakdown",
+            cash.elapsed.as_millis(),
+            false,
+            e.to_string(),
+        ),
     }
     match &hd.data {
         Ok(v) => {
             s.holdings = Holding::list_from(sc::result(v));
             s.holdings_raw = v.clone();
             let n = s.holdings.len();
-            s.push_log("broker.holdings", hd.elapsed.as_millis(), true, format!("{n} positions"));
+            s.push_log(
+                "broker.holdings",
+                hd.elapsed.as_millis(),
+                true,
+                format!("{n} positions"),
+            );
         }
-        Err(e) => s.push_log("broker.holdings", hd.elapsed.as_millis(), false, e.to_string()),
+        Err(e) => s.push_log(
+            "broker.holdings",
+            hd.elapsed.as_millis(),
+            false,
+            e.to_string(),
+        ),
     }
     match &tx.data {
         Ok(v) => {
             s.orders = PendingOrder::pending_from_transactions(sc::result(v));
             let n = s.orders.len();
-            s.push_log("broker.transactions", tx.elapsed.as_millis(), true, format!("{n} working"));
+            s.push_log(
+                "broker.transactions",
+                tx.elapsed.as_millis(),
+                true,
+                format!("{n} working"),
+            );
         }
-        Err(e) => s.push_log("broker.transactions", tx.elapsed.as_millis(), false, e.to_string()),
+        Err(e) => s.push_log(
+            "broker.transactions",
+            tx.elapsed.as_millis(),
+            false,
+            e.to_string(),
+        ),
     }
     // A stop is resting again, so the unprotected window is over.
-    if let Some(isin) = s.trail_gap.clone() {
-        if s.resting_stop(&isin).is_some() {
-            s.trail_gap = None;
-            s.push_log("trail.gap", 0, true, format!("{isin} protected again"));
-        }
+    if let Some(isin) = s.trail_gap.clone()
+        && s.resting_stop(&isin).is_some()
+    {
+        s.trail_gap = None;
+        s.push_log("trail.gap", 0, true, format!("{isin} protected again"));
     }
     match &an.data {
         Ok(v) => {
             s.analytics = Analytics::from_json(sc::result(v));
             s.push_log("broker.analytics", an.elapsed.as_millis(), true, "");
         }
-        Err(e) => s.push_log("broker.analytics", an.elapsed.as_millis(), false, e.to_string()),
+        Err(e) => s.push_log(
+            "broker.analytics",
+            an.elapsed.as_millis(),
+            false,
+            e.to_string(),
+        ),
     }
 }
 
@@ -507,7 +598,10 @@ fn refresh_watchlist(state: &Arc<Mutex<Shared>>) {
     match &call.data {
         Ok(v) => {
             let r = sc::result(v);
-            let items = sc::pick(r, &["items"]).and_then(Value::as_array).cloned().unwrap_or_default();
+            let items = sc::pick(r, &["items"])
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             s.watchlist = items
                 .iter()
                 .filter_map(|i| sc::str_at(i, &["isin"]))
@@ -522,11 +616,25 @@ fn refresh_watchlist(state: &Arc<Mutex<Shared>>) {
                 s.quotes.entry(q.isin.clone()).or_insert(q);
             }
             let n = s.watchlist.len();
-            s.push_log("broker.watchlist", call.elapsed.as_millis(), true, format!("{n} items"));
+            s.push_log(
+                "broker.watchlist",
+                call.elapsed.as_millis(),
+                true,
+                format!("{n} items"),
+            );
         }
-        Err(e) => s.push_log("broker.watchlist", call.elapsed.as_millis(), false, e.to_string()),
+        Err(e) => s.push_log(
+            "broker.watchlist",
+            call.elapsed.as_millis(),
+            false,
+            e.to_string(),
+        ),
     }
 }
+
+/// One instrument's result from a quote round: the ISIN, the parsed quote when
+/// it succeeded, how long the call took, and the error when it did not.
+type QuoteResult = (String, Option<Quote>, u128, Option<String>);
 
 /// Fan out one `sc broker quote` per ISIN across a fixed worker pool.
 /// This is the polling ceiling: round wall-clock ~= (n / QUOTE_FANOUT) * per_call.
@@ -535,8 +643,7 @@ fn refresh_quotes(state: &Arc<Mutex<Shared>>, isins: &[String]) {
         return;
     }
     let started = Instant::now();
-    let results: Arc<Mutex<Vec<(String, Option<Quote>, u128, Option<String>)>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let results: Arc<Mutex<Vec<QuoteResult>>> = Arc::new(Mutex::new(Vec::new()));
 
     // One pool of QUOTE_FANOUT workers pulling from a shared cursor. Chunking with
     // a scope per chunk would join at every chunk boundary and serialise the round
@@ -546,19 +653,26 @@ fn refresh_quotes(state: &Arc<Mutex<Shared>>, isins: &[String]) {
         for _ in 0..QUOTE_FANOUT.min(isins.len()) {
             let next = &next;
             let results = results.clone();
-            scope.spawn(move || loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                if i >= isins.len() {
-                    break;
+            scope.spawn(move || {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= isins.len() {
+                        break;
+                    }
+                    let isin = &isins[i];
+                    let call = sc::run(&["broker", "quote", "--isin", isin]);
+                    let ms = call.elapsed.as_millis();
+                    let entry = match &call.data {
+                        Ok(v) => (
+                            isin.clone(),
+                            Some(Quote::from_json(isin, sc::result(v))),
+                            ms,
+                            None,
+                        ),
+                        Err(e) => (isin.clone(), None, ms, Some(e.to_string())),
+                    };
+                    results.lock().unwrap().push(entry);
                 }
-                let isin = &isins[i];
-                let call = sc::run(&["broker", "quote", "--isin", isin]);
-                let ms = call.elapsed.as_millis();
-                let entry = match &call.data {
-                    Ok(v) => (isin.clone(), Some(Quote::from_json(isin, sc::result(v))), ms, None),
-                    Err(e) => (isin.clone(), None, ms, Some(e.to_string())),
-                };
-                results.lock().unwrap().push(entry);
             });
         }
     });
@@ -591,7 +705,12 @@ fn refresh_quotes(state: &Arc<Mutex<Shared>>, isins: &[String]) {
     let marks: Vec<(String, f64)> = s
         .trails
         .iter()
-        .filter_map(|t| s.quotes.get(&t.isin).and_then(|q| q.mid).map(|m| (t.isin.clone(), m)))
+        .filter_map(|t| {
+            s.quotes
+                .get(&t.isin)
+                .and_then(|q| q.mid)
+                .map(|m| (t.isin.clone(), m))
+        })
         .collect();
     for (isin, mid) in marks {
         if let Some(t) = s.trails.iter_mut().find(|t| t.isin == isin) {
@@ -627,12 +746,10 @@ fn load_chart(state: &Arc<Mutex<Shared>>, isin: &str, timeframe: &str, force: bo
     let key = (isin.to_string(), timeframe.to_string());
     {
         let mut s = state.lock().unwrap();
-        if !force {
-            if let Some(c) = s.chart_cache.get(&key) {
-                s.chart = c.clone();
-                s.chart_error = None;
-                return;
-            }
+        if !force && let Some(c) = s.chart_cache.get(&key) {
+            s.chart = c.clone();
+            s.chart_error = None;
+            return;
         }
         // Do not spend a request we know will be refused — queue it instead, so
         // the retry actually happens rather than the message merely promising it.
@@ -656,18 +773,35 @@ fn load_chart(state: &Arc<Mutex<Shared>>, isin: &str, timeframe: &str, force: bo
             s.chart = chart;
             s.chart_raw = v.clone();
             s.chart_error = None;
-            s.push_log("broker.chart", call.elapsed.as_millis(), true, format!("{isin} {timeframe}: {n} pts"));
+            s.push_log(
+                "broker.chart",
+                call.elapsed.as_millis(),
+                true,
+                format!("{isin} {timeframe}: {n} pts"),
+            );
         }
         Err(e) => {
             if e.kind == sc::ScErrorKind::RateLimited {
                 s.note_rate_limit("broker.chart");
-                s.chart_error = Some(format!("rate limited — retrying in {}s", RATE_LIMIT_BACKOFF.as_secs()));
+                s.chart_error = Some(format!(
+                    "rate limited — retrying in {}s",
+                    RATE_LIMIT_BACKOFF.as_secs()
+                ));
                 s.deferred_chart = Some((isin.to_string(), timeframe.to_string()));
             } else {
                 s.chart_error = Some(e.to_string());
             }
-            s.chart = Chart { isin: isin.to_string(), timeframe: timeframe.to_string(), ..Default::default() };
-            s.push_log("broker.chart", call.elapsed.as_millis(), false, format!("{}: {e}", call.cmdline()));
+            s.chart = Chart {
+                isin: isin.to_string(),
+                timeframe: timeframe.to_string(),
+                ..Default::default()
+            };
+            s.push_log(
+                "broker.chart",
+                call.elapsed.as_millis(),
+                false,
+                format!("{}: {e}", call.cmdline()),
+            );
         }
     }
 }
@@ -696,7 +830,10 @@ fn save_trails(trails: &[Trail]) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(path, serde_json::to_string_pretty(&rows).unwrap_or_default());
+    let _ = std::fs::write(
+        path,
+        serde_json::to_string_pretty(&rows).unwrap_or_default(),
+    );
 }
 
 pub fn load_trails() -> Vec<Trail> {
@@ -742,7 +879,12 @@ fn ratchet_trail(state: &Arc<Mutex<Shared>>, isin: &str) {
         let shares = resting
             .as_ref()
             .and_then(|o| o.quantity)
-            .or_else(|| s.holdings.iter().find(|h| h.isin == isin).map(|h| h.quantity))
+            .or_else(|| {
+                s.holdings
+                    .iter()
+                    .find(|h| h.isin == isin)
+                    .map(|h| h.quantity)
+            })
             .unwrap_or(0.0);
         (stop, shares, resting.map(|o| o.id))
     };
@@ -759,12 +901,22 @@ fn ratchet_trail(state: &Arc<Mutex<Shared>>, isin: &str) {
         match &call.data {
             Ok(_) => {
                 s.trail_gap = Some(isin.to_string());
-                s.push_log("trail.cancel", call.elapsed.as_millis(), true, format!("{isin} {id}"));
+                s.push_log(
+                    "trail.cancel",
+                    call.elapsed.as_millis(),
+                    true,
+                    format!("{isin} {id}"),
+                );
             }
             Err(e) => {
                 // The old stop is still resting, so the position stays protected.
                 s.trail_error = Some(format!("could not cancel the resting stop: {e}"));
-                s.push_log("trail.cancel", call.elapsed.as_millis(), false, e.to_string());
+                s.push_log(
+                    "trail.cancel",
+                    call.elapsed.as_millis(),
+                    false,
+                    e.to_string(),
+                );
                 return;
             }
         }
@@ -793,7 +945,11 @@ fn ratchet_trail(state: &Arc<Mutex<Shared>>, isin: &str) {
 /// Same discipline as charts: this endpoint rate-limits readily, so cache per
 /// (underlying, type, strategy) and refuse a request during a backoff.
 fn load_derivatives(state: &Arc<Mutex<Shared>>, underlying: &str, dtype: &str, strategy: &str) {
-    let key = (underlying.to_string(), dtype.to_string(), strategy.to_string());
+    let key = (
+        underlying.to_string(),
+        dtype.to_string(),
+        strategy.to_string(),
+    );
     {
         let mut s = state.lock().unwrap();
         if let Some(p) = s.derivatives_cache.get(&key) {
@@ -810,11 +966,17 @@ fn load_derivatives(state: &Arc<Mutex<Shared>>, underlying: &str, dtype: &str, s
     }
 
     let call = sc::run(&[
-        "broker", "derivatives", "search",
-        "--underlying", underlying,
-        "--type", dtype,
-        "--strategy", strategy,
-        "--limit", "50",
+        "broker",
+        "derivatives",
+        "search",
+        "--underlying",
+        underlying,
+        "--type",
+        dtype,
+        "--strategy",
+        strategy,
+        "--limit",
+        "50",
     ]);
     let mut s = state.lock().unwrap();
     s.derivatives_loading = false;
@@ -838,12 +1000,19 @@ fn load_derivatives(state: &Arc<Mutex<Shared>>, underlying: &str, dtype: &str, s
         Err(e) => {
             if e.kind == sc::ScErrorKind::RateLimited {
                 s.note_rate_limit("derivatives.search");
-                s.derivatives_error =
-                    Some(format!("rate limited — retry in {}s", RATE_LIMIT_BACKOFF.as_secs()));
+                s.derivatives_error = Some(format!(
+                    "rate limited — retry in {}s",
+                    RATE_LIMIT_BACKOFF.as_secs()
+                ));
             } else {
                 s.derivatives_error = Some(e.to_string());
             }
-            s.push_log("derivatives.search", call.elapsed.as_millis(), false, e.to_string());
+            s.push_log(
+                "derivatives.search",
+                call.elapsed.as_millis(),
+                false,
+                e.to_string(),
+            );
         }
     }
 }
@@ -859,9 +1028,19 @@ fn do_search(state: &Arc<Mutex<Shared>>, q: &str) {
                 .cloned()
                 .unwrap_or_default();
             let n = s.search_results.len();
-            s.push_log("broker.search", call.elapsed.as_millis(), true, format!("{q}: {n} hits"));
+            s.push_log(
+                "broker.search",
+                call.elapsed.as_millis(),
+                true,
+                format!("{q}: {n} hits"),
+            );
         }
-        Err(e) => s.push_log("broker.search", call.elapsed.as_millis(), false, format!("{q}: {e}")),
+        Err(e) => s.push_log(
+            "broker.search",
+            call.elapsed.as_millis(),
+            false,
+            format!("{q}: {e}"),
+        ),
     }
 }
 
@@ -882,7 +1061,12 @@ fn do_preview(state: &Arc<Mutex<Shared>>, intent: &TradeIntent) {
     match &call.data {
         Ok(v) => match TradePreview::from_json(v) {
             Some(p) => {
-                s.push_log("trade.preview", call.elapsed.as_millis(), true, p.confirmation_id.clone());
+                s.push_log(
+                    "trade.preview",
+                    call.elapsed.as_millis(),
+                    true,
+                    p.confirmation_id.clone(),
+                );
                 s.preview = Some(p);
             }
             None => {
@@ -891,7 +1075,12 @@ fn do_preview(state: &Arc<Mutex<Shared>>, intent: &TradeIntent) {
                     call.cmdline(),
                     call.raw_head(600)
                 ));
-                s.push_log("trade.preview", call.elapsed.as_millis(), false, "no confirmation id");
+                s.push_log(
+                    "trade.preview",
+                    call.elapsed.as_millis(),
+                    false,
+                    "no confirmation id",
+                );
             }
         },
         Err(e) => {
@@ -902,7 +1091,12 @@ fn do_preview(state: &Arc<Mutex<Shared>>, intent: &TradeIntent) {
                 s.session_error = Some(format!("{e} — run `sc login`"));
             }
             s.preview_error = Some(e.to_string());
-            s.push_log("trade.preview", call.elapsed.as_millis(), false, e.to_string());
+            s.push_log(
+                "trade.preview",
+                call.elapsed.as_millis(),
+                false,
+                e.to_string(),
+            );
         }
     }
 }
@@ -930,7 +1124,12 @@ fn do_submit(state: &Arc<Mutex<Shared>>, intent: &TradeIntent, id: &str, accept_
         }
         Err(e) => {
             s.order_error = Some(e.to_string());
-            s.push_log("trade.submit", call.elapsed.as_millis(), false, e.to_string());
+            s.push_log(
+                "trade.submit",
+                call.elapsed.as_millis(),
+                false,
+                e.to_string(),
+            );
         }
     }
 }

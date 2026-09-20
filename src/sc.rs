@@ -91,13 +91,22 @@ pub fn run(args: &[&str]) -> Call {
             let stdout = String::from_utf8_lossy(&o.stdout).to_string();
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
             let exit = o.status.code().unwrap_or(1);
-            let body = if stdout.trim().is_empty() { stderr.clone() } else { stdout.clone() };
+            let body = if stdout.trim().is_empty() {
+                stderr.clone()
+            } else {
+                stdout.clone()
+            };
             let parsed = parse_envelope(&body, exit);
             (body, parsed)
         }
     };
 
-    Call { argv, elapsed, raw, data }
+    Call {
+        argv,
+        elapsed,
+        raw,
+        data,
+    }
 }
 
 impl Call {
@@ -119,9 +128,12 @@ fn parse_envelope(body: &str, exit: i32) -> Result<Value, ScError> {
             return Err(ScError {
                 kind: ScErrorKind::from_code(exit),
                 code: "bad_json".into(),
-                message: format!("non-JSON output ({e}): {}", body.chars().take(400).collect::<String>()),
+                message: format!(
+                    "non-JSON output ({e}): {}",
+                    body.chars().take(400).collect::<String>()
+                ),
                 hints: vec![],
-            })
+            });
         }
     };
 
@@ -156,7 +168,11 @@ fn parse_envelope(body: &str, exit: i32) -> Result<Value, ScError> {
         hints: v
             .get("hints")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|h| h.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|h| h.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default(),
     })
 }
