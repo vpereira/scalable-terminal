@@ -268,6 +268,38 @@ fn signed(ui: &mut egui::Ui, v: Option<f64>, dp: usize, suffix: &str) {
     ui.label(signed_text(v, dp, suffix));
 }
 
+/// A titled, bordered box. Without one, two stacked tables read as a single
+/// list and a search hit looks like a watchlist row.
+fn section<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    right: Option<&str>,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> (R, bool) {
+    let mut clicked = false;
+    let out = egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .corner_radius(4)
+        .show(ui, |ui| {
+            // Fill the column, otherwise each box sizes to its own content and
+            // the stack looks ragged.
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).strong().color(BLUE));
+                if let Some(label) = right {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        clicked = ui.small_button(label).clicked();
+                    });
+                }
+            });
+            ui.add_space(3.0);
+            add(ui)
+        })
+        .inner;
+    ui.add_space(4.0);
+    (out, clicked)
+}
+
 /// Big number with a caption. Fixed width so a row of these wraps as whole
 /// cells rather than breaking each number across lines.
 fn stat(ui: &mut egui::Ui, caption: &str, value: String, color: Color32) {
@@ -667,7 +699,11 @@ impl App {
 
             ui.horizontal(|ui| {
                 ui.heading("Watchlist");
-                ui.label(RichText::new("synced with your Scalable account").color(DIM).small());
+                ui.label(
+                    RichText::new("synced with your Scalable account")
+                        .color(DIM)
+                        .small(),
+                );
             });
 
             ui.horizontal(|ui| {
@@ -704,27 +740,46 @@ impl App {
 
             let results = { self.io.state.lock().unwrap().search_results.clone() };
             if !results.is_empty() {
-                ui.separator();
-                ui.label(RichText::new("Search results").strong());
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    for r in results.iter().take(50) {
-                        let isin = crate::sc::str_at(r, &["isin"]).unwrap_or_default();
-                        let name = crate::sc::str_at(r, &["name"]).unwrap_or_default();
-                        let mid = crate::sc::f64_at(r, &["quote_mid_price"]);
-                        let stype = crate::sc::str_at(r, &["security_type"]).unwrap_or_default();
-                        ui.horizontal(|ui| {
-                            if ui.small_button("+").clicked() && !isin.is_empty() {
-                                let _ = self.io.tx.send(Cmd::WatchlistAdd(isin.clone()));
+                let label = format!("Search results ({})", results.len());
+                let (_, clear) = section(ui, &label, Some("clear"), |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("search_results")
+                        .max_height(150.0)
+                        .show(ui, |ui| {
+                            for r in results.iter().take(50) {
+                                let isin = crate::sc::str_at(r, &["isin"]).unwrap_or_default();
+                                let name = crate::sc::str_at(r, &["name"]).unwrap_or_default();
+                                let mid = crate::sc::f64_at(r, &["quote_mid_price"]);
+                                let stype =
+                                    crate::sc::str_at(r, &["security_type"]).unwrap_or_default();
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .small_button("+")
+                                        .on_hover_text("add to watchlist")
+                                        .clicked()
+                                        && !isin.is_empty()
+                                    {
+                                        let _ = self.io.tx.send(Cmd::WatchlistAdd(isin.clone()));
+                                    }
+                                    if ui
+                                        .selectable_label(
+                                            self.selected.as_deref() == Some(isin.as_str()),
+                                            RichText::new(&isin).monospace(),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.select(isin.clone());
+                                    }
+                                    ui.label(RichText::new(num(mid, 4)).monospace());
+                                    ui.label(RichText::new(&stype).color(BLUE).small());
+                                    ui.label(RichText::new(&name).color(DIM));
+                                });
                             }
-                            if ui.selectable_label(false, RichText::new(&isin).monospace()).clicked() {
-                                self.select(isin.clone());
-                            }
-                            ui.label(RichText::new(num(mid, 4)).monospace());
-                            ui.label(RichText::new(&stype).color(BLUE).small());
-                            ui.label(RichText::new(&name).color(DIM));
                         });
-                    }
                 });
+                if clear {
+                    self.io.state.lock().unwrap().search_results.clear();
+                }
             }
 
             // Scalable refuses to watchlist anything you hold, so a position can
@@ -753,6 +808,8 @@ impl App {
             let mut remove: Option<String> = None;
             let mut pick: Option<String> = None;
 
+            let title = format!("Instruments ({})", rows.len());
+            let (_, _) = section(ui, &title, None, |ui| {
             TableBuilder::new(ui)
                 .striped(true)
                 .cell_layout(egui::Layout::right_to_left(egui::Align::Center))
@@ -849,6 +906,7 @@ impl App {
                         });
                     });
                 });
+            });
 
             if let Some(p) = pick {
                 self.select(p);
@@ -869,38 +927,33 @@ impl App {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let acct = { self.io.state.lock().unwrap().account.clone() };
 
-                    ui.horizontal(|ui| {
-                        ui.heading("Account");
-                        ui.label(RichText::new(&acct.currency).color(DIM).monospace());
+                    let title = format!("Account {}", acct.currency);
+                    section(ui, &title, None, |ui| {
+                        egui::Grid::new("acct")
+                            .num_columns(2)
+                            .spacing([18.0, 2.0])
+                            .show(ui, |ui| {
+                                let r = |ui: &mut egui::Ui, k: &str, v: String| {
+                                    ui.label(RichText::new(k).color(DIM));
+                                    ui.label(RichText::new(v).monospace());
+                                    ui.end_row();
+                                };
+                                r(ui, "Total", num(acct.total, 2));
+                                r(ui, "Securities", num(acct.securities, 2));
+                                r(ui, "Cash", num(acct.cash, 2));
+                                r(ui, "Buying power", num(acct.buying_power, 2));
+                                if acct.pending_buy_orders.unwrap_or(0.0) != 0.0 {
+                                    r(ui, "Reserved by orders", num(acct.pending_buy_orders, 2));
+                                }
+                                if acct.possible_taxes.unwrap_or(0.0) != 0.0 {
+                                    r(ui, "Possible taxes", num(acct.possible_taxes, 2));
+                                }
+                            });
                     });
-                    egui::Grid::new("acct")
-                        .num_columns(2)
-                        .spacing([18.0, 2.0])
-                        .show(ui, |ui| {
-                            let r = |ui: &mut egui::Ui, k: &str, v: String| {
-                                ui.label(RichText::new(k).color(DIM));
-                                ui.label(RichText::new(v).monospace());
-                                ui.end_row();
-                            };
-                            r(ui, "Total", num(acct.total, 2));
-                            r(ui, "Securities", num(acct.securities, 2));
-                            r(ui, "Cash", num(acct.cash, 2));
-                            r(ui, "Buying power", num(acct.buying_power, 2));
-                            if acct.pending_buy_orders.unwrap_or(0.0) != 0.0 {
-                                r(ui, "Reserved by orders", num(acct.pending_buy_orders, 2));
-                            }
-                            if acct.possible_taxes.unwrap_or(0.0) != 0.0 {
-                                r(ui, "Possible taxes", num(acct.possible_taxes, 2));
-                            }
-                        });
 
-                    ui.separator();
                     self.positions(ui);
-                    ui.separator();
                     self.orders(ui);
-                    ui.separator();
                     self.trails(ui);
-                    ui.separator();
                     self.ticket(ui);
                 });
             });
@@ -912,18 +965,19 @@ impl App {
             (s.holdings.clone(), s.quotes.clone(), s.orders.clone())
         };
 
-        ui.horizontal(|ui| {
-            ui.heading(format!("Positions ({})", holdings.len()));
-            let total: Option<f64> = {
-                let v: Vec<f64> = holdings.iter().filter_map(|h| h.unrealized()).collect();
-                (!v.is_empty()).then(|| v.iter().sum())
-            };
-            ui.label(RichText::new("unrealized").color(DIM).small());
-            signed(ui, total, 2, "");
-        });
+        let total: Option<f64> = {
+            let v: Vec<f64> = holdings.iter().filter_map(|h| h.unrealized()).collect();
+            (!v.is_empty()).then(|| v.iter().sum())
+        };
+        let title = format!("Positions ({})", holdings.len());
 
         let mut pick: Option<String> = None;
-        TableBuilder::new(ui)
+        section(ui, &title, None, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("unrealized").color(DIM).small());
+                signed(ui, total, 2, "");
+            });
+            TableBuilder::new(ui)
             .striped(true)
             .cell_layout(egui::Layout::right_to_left(egui::Align::Center))
             .column(Column::exact(116.0))
@@ -996,6 +1050,7 @@ impl App {
                     });
                 });
             });
+        });
 
         if let Some(p) = pick {
             self.select(p);
@@ -1004,64 +1059,66 @@ impl App {
 
     fn orders(&mut self, ui: &mut egui::Ui) {
         let orders = { self.io.state.lock().unwrap().orders.clone() };
-        ui.heading(format!("Working orders ({})", orders.len()));
-        if orders.is_empty() {
-            ui.label(RichText::new("none").color(DIM));
-            return;
-        }
+        let title = format!("Working orders ({})", orders.len());
         let mut cancel: Option<String> = None;
         let mut pick: Option<String> = None;
-        for o in &orders {
-            ui.horizontal(|ui| {
-                let c = if o.side.eq_ignore_ascii_case("SELL") {
-                    RED
-                } else {
-                    GREEN
-                };
-                ui.label(RichText::new(&o.side).color(c).monospace().strong());
-                if ui
-                    .selectable_label(
-                        self.selected.as_deref() == Some(o.isin.as_str()),
-                        RichText::new(&o.isin).monospace(),
-                    )
-                    .clicked()
-                {
-                    pick = Some(o.isin.clone());
-                }
-                match o.quantity {
-                    Some(q) => {
-                        ui.label(RichText::new(format!("{q:.4}")).monospace());
+        section(ui, &title, None, |ui| {
+            if orders.is_empty() {
+                ui.label(RichText::new("none").color(DIM));
+            }
+            for o in &orders {
+                ui.horizontal(|ui| {
+                    let c = if o.side.eq_ignore_ascii_case("SELL") {
+                        RED
+                    } else {
+                        GREEN
+                    };
+                    ui.label(RichText::new(&o.side).color(c).monospace().strong());
+                    if ui
+                        .selectable_label(
+                            self.selected.as_deref() == Some(o.isin.as_str()),
+                            RichText::new(&o.isin).monospace(),
+                        )
+                        .clicked()
+                    {
+                        pick = Some(o.isin.clone());
                     }
-                    None => {
+                    match o.quantity {
+                        Some(q) => {
+                            ui.label(RichText::new(format!("{q:.4}")).monospace());
+                        }
+                        None => {
+                            ui.label(
+                                RichText::new(format!("{} {}", num(o.amount, 2), o.currency))
+                                    .monospace(),
+                            );
+                        }
+                    }
+                    if let Some(l) = o.limit_price {
+                        ui.label(RichText::new(format!("lmt {l:.4}")).monospace().color(BLUE));
+                    }
+                    if let Some(sp) = o.stop_price {
                         ui.label(
-                            RichText::new(format!("{} {}", num(o.amount, 2), o.currency))
-                                .monospace(),
+                            RichText::new(format!("stp {sp:.4}"))
+                                .monospace()
+                                .color(AMBER),
                         );
                     }
-                }
-                if let Some(l) = o.limit_price {
-                    ui.label(RichText::new(format!("lmt {l:.4}")).monospace().color(BLUE));
-                }
-                if let Some(sp) = o.stop_price {
-                    ui.label(
-                        RichText::new(format!("stp {sp:.4}"))
-                            .monospace()
-                            .color(AMBER),
-                    );
-                }
-                if ui.small_button("cancel").clicked() {
-                    cancel = Some(o.id.clone());
-                }
-            });
-            ui.label(
-                RichText::new(format!(
-                    "   {} · {} · {}",
-                    o.description, o.status, o.last_event
-                ))
-                .color(DIM)
-                .small(),
-            );
-        }
+                    if ui.small_button("cancel").clicked() {
+                        cancel = Some(o.id.clone());
+                    }
+                });
+                ui.label(
+                    RichText::new(format!(
+                        "   {} · {} · {}",
+                        o.description, o.status, o.last_event
+                    ))
+                    .color(DIM)
+                    .small(),
+                );
+            }
+        });
+
         if let Some(p) = pick {
             self.select(p);
         }
@@ -1084,157 +1141,160 @@ impl App {
             )
         };
 
-        ui.heading("Trailing stops");
-
-        if let Some(isin) = &gap {
-            ui.label(
-                RichText::new(format!("{isin} HAS NO STOP RIGHT NOW"))
-                    .color(Color32::WHITE)
-                    .background_color(RED)
-                    .strong(),
-            );
-            ui.label(
-                RichText::new("the old stop was cancelled and the replacement is not placed yet")
-                    .color(AMBER)
-                    .small(),
-            );
-        }
-        if let Some(e) = &err {
-            ui.label(RichText::new(e).color(RED));
-        }
-
-        // Arm a trail on whatever is selected, if it is actually held.
-        if let Some(isin) = self.selected.clone() {
-            let held = {
-                let s = self.io.state.lock().unwrap();
-                s.holdings
-                    .iter()
-                    .any(|h| h.isin == isin && h.quantity > 0.0)
-            };
-            if held && !trails.iter().any(|t| t.isin == isin) {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("arm").color(DIM));
-                    ui.add(
-                        egui::DragValue::new(&mut self.trail_distance)
-                            .speed(0.1)
-                            .range(0.1..=90.0)
-                            .suffix(if self.trail_percent { " %" } else { "" }),
-                    );
-                    ui.selectable_value(&mut self.trail_percent, true, "%");
-                    ui.selectable_value(&mut self.trail_percent, false, "abs");
-                    if ui.button("Arm trail").clicked() {
-                        let distance = if self.trail_percent {
-                            self.trail_distance / 100.0
-                        } else {
-                            self.trail_distance
-                        };
-                        let _ = self.io.tx.send(Cmd::ArmTrail {
-                            isin: isin.clone(),
-                            distance,
-                            percent: self.trail_percent,
-                        });
-                    }
-                });
-            }
-        }
-
-        if trails.is_empty() {
-            ui.label(RichText::new("none armed").color(DIM));
-            return;
-        }
-
         let mut ratchet: Option<String> = None;
         let mut disarm: Option<String> = None;
 
-        for t in &trails {
-            let resting = orders.iter().find(|o| {
-                o.isin == t.isin && o.side.eq_ignore_ascii_case("SELL") && o.stop_price.is_some()
-            });
-            let current = resting.and_then(|o| o.stop_price);
-            let mid = quotes.get(&t.isin).and_then(|q| q.mid);
-            let suggested = t.suggested_stop();
-            let move_now = t.should_move(current);
-
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&t.isin).monospace().strong());
+        section(ui, "Trailing stops", None, |ui| {
+            if let Some(isin) = &gap {
                 ui.label(
-                    RichText::new(if t.percent {
-                        format!("trail {:.2}%", t.distance * 100.0)
-                    } else {
-                        format!("trail {:.4}", t.distance)
-                    })
-                    .color(DIM),
+                    RichText::new(format!("{isin} HAS NO STOP RIGHT NOW"))
+                        .color(Color32::WHITE)
+                        .background_color(RED)
+                        .strong(),
                 );
-                if ui.small_button("disarm").clicked() {
-                    disarm = Some(t.isin.clone());
-                }
-            });
+                ui.label(
+                    RichText::new(
+                        "the old stop was cancelled and the replacement is not placed yet",
+                    )
+                    .color(AMBER)
+                    .small(),
+                );
+            }
+            if let Some(e) = &err {
+                ui.label(RichText::new(e).color(RED));
+            }
 
-            egui::Grid::new(format!("trail_{}", t.isin))
-                .num_columns(2)
-                .spacing([14.0, 2.0])
-                .show(ui, |ui| {
-                    let row = |ui: &mut egui::Ui, k: &str, v: RichText| {
-                        ui.label(RichText::new(k).color(DIM).small());
-                        ui.label(v);
-                        ui.end_row();
-                    };
-                    row(
-                        ui,
-                        "high water",
-                        RichText::new(format!("{:.4}", t.high_water)).monospace(),
-                    );
-                    row(ui, "price", RichText::new(num(mid, 4)).monospace());
-                    row(
-                        ui,
-                        "resting stop",
-                        match current {
-                            Some(c) => RichText::new(format!("{c:.4}")).monospace(),
-                            None => RichText::new("NONE").color(RED).monospace().strong(),
-                        },
-                    );
-                    row(
-                        ui,
-                        "suggested",
-                        RichText::new(num(suggested, 4))
-                            .monospace()
-                            .color(if move_now { AMBER } else { DIM }),
-                    );
-                    if let Some(c) = mid.and_then(|m| t.cushion(m, current)) {
-                        row(
-                            ui,
-                            "cushion",
-                            RichText::new(format!("{:.2}%", c * 100.0))
-                                .monospace()
-                                .color(if c < 0.01 { RED } else { DIM }),
+            // Arm a trail on whatever is selected, if it is actually held.
+            if let Some(isin) = self.selected.clone() {
+                let held = {
+                    let s = self.io.state.lock().unwrap();
+                    s.holdings
+                        .iter()
+                        .any(|h| h.isin == isin && h.quantity > 0.0)
+                };
+                if held && !trails.iter().any(|t| t.isin == isin) {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("arm").color(DIM));
+                        ui.add(
+                            egui::DragValue::new(&mut self.trail_distance)
+                                .speed(0.1)
+                                .range(0.1..=90.0)
+                                .suffix(if self.trail_percent { " %" } else { "" }),
                         );
+                        ui.selectable_value(&mut self.trail_percent, true, "%");
+                        ui.selectable_value(&mut self.trail_percent, false, "abs");
+                        if ui.button("Arm trail").clicked() {
+                            let distance = if self.trail_percent {
+                                self.trail_distance / 100.0
+                            } else {
+                                self.trail_distance
+                            };
+                            let _ = self.io.tx.send(Cmd::ArmTrail {
+                                isin: isin.clone(),
+                                distance,
+                                percent: self.trail_percent,
+                            });
+                        }
+                    });
+                }
+            }
+
+            if trails.is_empty() {
+                ui.label(RichText::new("none armed").color(DIM));
+            }
+
+            for t in &trails {
+                let resting = orders.iter().find(|o| {
+                    o.isin == t.isin
+                        && o.side.eq_ignore_ascii_case("SELL")
+                        && o.stop_price.is_some()
+                });
+                let current = resting.and_then(|o| o.stop_price);
+                let mid = quotes.get(&t.isin).and_then(|q| q.mid);
+                let suggested = t.suggested_stop();
+                let move_now = t.should_move(current);
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&t.isin).monospace().strong());
+                    ui.label(
+                        RichText::new(if t.percent {
+                            format!("trail {:.2}%", t.distance * 100.0)
+                        } else {
+                            format!("trail {:.4}", t.distance)
+                        })
+                        .color(DIM),
+                    );
+                    if ui.small_button("disarm").clicked() {
+                        disarm = Some(t.isin.clone());
                     }
                 });
 
-            if move_now {
-                let label = match current {
-                    Some(_) => "Move stop up",
-                    None => "Place stop",
-                };
-                if ui
-                    .add(egui::Button::new(RichText::new(label).strong()))
-                    .on_hover_text(
-                        "cancels the resting stop, then previews the replacement. \n\
+                egui::Grid::new(format!("trail_{}", t.isin))
+                    .num_columns(2)
+                    .spacing([14.0, 2.0])
+                    .show(ui, |ui| {
+                        let row = |ui: &mut egui::Ui, k: &str, v: RichText| {
+                            ui.label(RichText::new(k).color(DIM).small());
+                            ui.label(v);
+                            ui.end_row();
+                        };
+                        row(
+                            ui,
+                            "high water",
+                            RichText::new(format!("{:.4}", t.high_water)).monospace(),
+                        );
+                        row(ui, "price", RichText::new(num(mid, 4)).monospace());
+                        row(
+                            ui,
+                            "resting stop",
+                            match current {
+                                Some(c) => RichText::new(format!("{c:.4}")).monospace(),
+                                None => RichText::new("NONE").color(RED).monospace().strong(),
+                            },
+                        );
+                        row(
+                            ui,
+                            "suggested",
+                            RichText::new(num(suggested, 4))
+                                .monospace()
+                                .color(if move_now { AMBER } else { DIM }),
+                        );
+                        if let Some(c) = mid.and_then(|m| t.cushion(m, current)) {
+                            row(
+                                ui,
+                                "cushion",
+                                RichText::new(format!("{:.2}%", c * 100.0))
+                                    .monospace()
+                                    .color(if c < 0.01 { RED } else { DIM }),
+                            );
+                        }
+                    });
+
+                if move_now {
+                    let label = match current {
+                        Some(_) => "Move stop up",
+                        None => "Place stop",
+                    };
+                    if ui
+                        .add(egui::Button::new(RichText::new(label).strong()))
+                        .on_hover_text(
+                            "cancels the resting stop, then previews the replacement. \n\
                          the position is unprotected until you confirm it.",
-                    )
-                    .clicked()
-                {
-                    ratchet = Some(t.isin.clone());
+                        )
+                        .clicked()
+                    {
+                        ratchet = Some(t.isin.clone());
+                    }
+                } else {
+                    ui.label(
+                        RichText::new("stop is where it should be")
+                            .color(DIM)
+                            .small(),
+                    );
                 }
-            } else {
-                ui.label(
-                    RichText::new("stop is where it should be")
-                        .color(DIM)
-                        .small(),
-                );
             }
-        }
+        });
 
         if let Some(isin) = ratchet {
             let _ = self.io.tx.send(Cmd::RatchetTrail { isin });
@@ -1245,224 +1305,229 @@ impl App {
     }
 
     fn ticket(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Order ticket");
-        let isin = self.selected.clone().unwrap_or_default();
-        if isin.is_empty() {
-            ui.label(RichText::new("select an instrument").color(DIM));
-            return;
-        }
-        let (q, held, working) = {
-            let s = self.io.state.lock().unwrap();
-            (
-                s.quotes.get(&isin).cloned(),
-                s.holdings.iter().find(|h| h.isin == isin).cloned(),
-                s.orders.clone(),
-            )
-        };
-
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&isin).monospace().strong());
-            if let Some(q) = &q {
-                ui.label(
-                    RichText::new(format!("bid {}", num(q.bid, 4)))
-                        .monospace()
-                        .color(RED),
-                );
-                ui.label(
-                    RichText::new(format!("ask {}", num(q.ask, 4)))
-                        .monospace()
-                        .color(GREEN),
-                );
-                if let Some(b) = q.spread_bps() {
-                    ui.label(RichText::new(format!("{b:.1} bps")).color(DIM).monospace());
-                }
+        section(ui, "Order ticket", None, |ui| {
+            let isin = self.selected.clone().unwrap_or_default();
+            if isin.is_empty() {
+                section(ui, "Order ticket", None, |ui| {
+                    ui.label(RichText::new("select an instrument").color(DIM));
+                });
+                return;
             }
-        });
+            let (q, held, working) = {
+                let s = self.io.state.lock().unwrap();
+                (
+                    s.quotes.get(&isin).cloned(),
+                    s.holdings.iter().find(|h| h.isin == isin).cloned(),
+                    s.orders.clone(),
+                )
+            };
 
-        ui.horizontal(|ui| {
-            ui.selectable_value(
-                &mut self.side,
-                Side::Buy,
-                RichText::new("BUY").color(GREEN).strong(),
-            );
-            ui.selectable_value(
-                &mut self.side,
-                Side::Sell,
-                RichText::new("SELL").color(RED).strong(),
-            );
-            ui.separator();
-            ui.selectable_value(&mut self.order_type, OrderType::Market, "Market");
-            ui.selectable_value(&mut self.order_type, OrderType::Limit, "Limit");
-            ui.selectable_value(&mut self.order_type, OrderType::Stop, "Stop");
-        });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&isin).monospace().strong());
+                if let Some(q) = &q {
+                    ui.label(
+                        RichText::new(format!("bid {}", num(q.bid, 4)))
+                            .monospace()
+                            .color(RED),
+                    );
+                    ui.label(
+                        RichText::new(format!("ask {}", num(q.ask, 4)))
+                            .monospace()
+                            .color(GREEN),
+                    );
+                    if let Some(b) = q.spread_bps() {
+                        ui.label(RichText::new(format!("{b:.1} bps")).color(DIM).monospace());
+                    }
+                }
+            });
 
-        if self.side == Side::Sell {
-            self.size_by_shares = true;
-            match &held {
-                Some(h) => {
-                    let free = h.free_quantity(&working);
-                    let committed = h.quantity - free;
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("holding {:.4}", h.quantity)).color(DIM));
-                        if committed > 0.0 {
+            ui.horizontal(|ui| {
+                ui.selectable_value(
+                    &mut self.side,
+                    Side::Buy,
+                    RichText::new("BUY").color(GREEN).strong(),
+                );
+                ui.selectable_value(
+                    &mut self.side,
+                    Side::Sell,
+                    RichText::new("SELL").color(RED).strong(),
+                );
+                ui.separator();
+                ui.selectable_value(&mut self.order_type, OrderType::Market, "Market");
+                ui.selectable_value(&mut self.order_type, OrderType::Limit, "Limit");
+                ui.selectable_value(&mut self.order_type, OrderType::Stop, "Stop");
+            });
+
+            if self.side == Side::Sell {
+                self.size_by_shares = true;
+                match &held {
+                    Some(h) => {
+                        let free = h.free_quantity(&working);
+                        let committed = h.quantity - free;
+                        ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new(format!("· {committed:.4} already working"))
-                                    .color(AMBER)
-                                    .small(),
+                                RichText::new(format!("holding {:.4}", h.quantity)).color(DIM),
                             );
-                        }
-                        ui.label(
-                            RichText::new(format!("· free {free:.4}")).color(if free > 0.0 {
-                                GREEN
-                            } else {
-                                RED
-                            }),
-                        );
-                        if ui
-                            .add_enabled(free > 0.0, egui::Button::new("all").small())
-                            .clicked()
-                        {
-                            self.shares = free;
-                        }
-                        if ui
-                            .add_enabled(free > 0.0, egui::Button::new("half").small())
-                            .clicked()
-                        {
-                            self.shares = (free / 2.0 * 10_000.0).floor() / 10_000.0;
-                        }
-                    });
-                    if self.shares > free {
-                        ui.label(
+                            if committed > 0.0 {
+                                ui.label(
+                                    RichText::new(format!("· {committed:.4} already working"))
+                                        .color(AMBER)
+                                        .small(),
+                                );
+                            }
+                            ui.label(
+                                RichText::new(format!("· free {free:.4}")).color(if free > 0.0 {
+                                    GREEN
+                                } else {
+                                    RED
+                                }),
+                            );
+                            if ui
+                                .add_enabled(free > 0.0, egui::Button::new("all").small())
+                                .clicked()
+                            {
+                                self.shares = free;
+                            }
+                            if ui
+                                .add_enabled(free > 0.0, egui::Button::new("half").small())
+                                .clicked()
+                            {
+                                self.shares = (free / 2.0 * 10_000.0).floor() / 10_000.0;
+                            }
+                        });
+                        if self.shares > free {
+                            ui.label(
                             RichText::new(format!(
                                 "sizing {:.4} but only {free:.4} free — the rest is committed to working orders",
                                 self.shares
                             ))
                             .color(AMBER),
                         );
+                        }
+                    }
+                    None => {
+                        ui.label(RichText::new("no position in this instrument").color(AMBER));
                     }
                 }
-                None => {
-                    ui.label(RichText::new("no position in this instrument").color(AMBER));
-                }
-            }
-        } else {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.size_by_shares, false, "€ amount");
-                ui.selectable_value(&mut self.size_by_shares, true, "shares");
-            });
-        }
-
-        ui.horizontal(|ui| {
-            if self.size_by_shares {
-                ui.label("Shares");
-                ui.add(
-                    egui::DragValue::new(&mut self.shares)
-                        .speed(0.1)
-                        .range(0.0..=1e9),
-                );
-                if let Some(p) = q.as_ref().and_then(|q| q.mid) {
-                    ui.label(
-                        RichText::new(format!("≈ {:.2}", p * self.shares))
-                            .color(DIM)
-                            .monospace(),
-                    );
-                }
             } else {
-                ui.label("Amount");
-                ui.add(
-                    egui::DragValue::new(&mut self.amount)
-                        .speed(10.0)
-                        .range(0.0..=1e9)
-                        .suffix(" €"),
-                );
-                if let Some(p) = q.as_ref().and_then(|q| q.ask.or(q.mid))
-                    && p > 0.0
-                {
-                    ui.label(
-                        RichText::new(format!("≈ {:.4} sh", self.amount / p))
-                            .color(DIM)
-                            .monospace(),
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.size_by_shares, false, "€ amount");
+                    ui.selectable_value(&mut self.size_by_shares, true, "shares");
+                });
+            }
+
+            ui.horizontal(|ui| {
+                if self.size_by_shares {
+                    ui.label("Shares");
+                    ui.add(
+                        egui::DragValue::new(&mut self.shares)
+                            .speed(0.1)
+                            .range(0.0..=1e9),
                     );
-                }
-            }
-        });
-
-        if self.order_type == OrderType::Limit {
-            ui.horizontal(|ui| {
-                ui.label("Limit");
-                ui.add(
-                    egui::DragValue::new(&mut self.limit_price)
-                        .speed(0.01)
-                        .range(0.0..=1e9),
-                );
-                if ui.small_button("bid").clicked()
-                    && let Some(b) = q.as_ref().and_then(|q| q.bid)
-                {
-                    self.limit_price = b;
-                }
-                if ui.small_button("mid").clicked()
-                    && let Some(m) = q.as_ref().and_then(|q| q.mid)
-                {
-                    self.limit_price = m;
-                }
-                if ui.small_button("ask").clicked()
-                    && let Some(a) = q.as_ref().and_then(|q| q.ask)
-                {
-                    self.limit_price = a;
+                    if let Some(p) = q.as_ref().and_then(|q| q.mid) {
+                        ui.label(
+                            RichText::new(format!("≈ {:.2}", p * self.shares))
+                                .color(DIM)
+                                .monospace(),
+                        );
+                    }
+                } else {
+                    ui.label("Amount");
+                    ui.add(
+                        egui::DragValue::new(&mut self.amount)
+                            .speed(10.0)
+                            .range(0.0..=1e9)
+                            .suffix(" €"),
+                    );
+                    if let Some(p) = q.as_ref().and_then(|q| q.ask.or(q.mid))
+                        && p > 0.0
+                    {
+                        ui.label(
+                            RichText::new(format!("≈ {:.4} sh", self.amount / p))
+                                .color(DIM)
+                                .monospace(),
+                        );
+                    }
                 }
             });
-        }
-        if self.order_type == OrderType::Stop {
+
+            if self.order_type == OrderType::Limit {
+                ui.horizontal(|ui| {
+                    ui.label("Limit");
+                    ui.add(
+                        egui::DragValue::new(&mut self.limit_price)
+                            .speed(0.01)
+                            .range(0.0..=1e9),
+                    );
+                    if ui.small_button("bid").clicked()
+                        && let Some(b) = q.as_ref().and_then(|q| q.bid)
+                    {
+                        self.limit_price = b;
+                    }
+                    if ui.small_button("mid").clicked()
+                        && let Some(m) = q.as_ref().and_then(|q| q.mid)
+                    {
+                        self.limit_price = m;
+                    }
+                    if ui.small_button("ask").clicked()
+                        && let Some(a) = q.as_ref().and_then(|q| q.ask)
+                    {
+                        self.limit_price = a;
+                    }
+                });
+            }
+            if self.order_type == OrderType::Stop {
+                ui.horizontal(|ui| {
+                    ui.label("Stop");
+                    ui.add(
+                        egui::DragValue::new(&mut self.stop_price)
+                            .speed(0.01)
+                            .range(0.0..=1e9),
+                    );
+                });
+            }
+
             ui.horizontal(|ui| {
-                ui.label("Stop");
+                ui.label("Venue");
                 ui.add(
-                    egui::DragValue::new(&mut self.stop_price)
-                        .speed(0.01)
-                        .range(0.0..=1e9),
+                    egui::TextEdit::singleline(&mut self.venue)
+                        .hint_text("default")
+                        .desired_width(120.0),
                 );
             });
-        }
 
-        ui.horizontal(|ui| {
-            ui.label("Venue");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.venue)
-                    .hint_text("default")
-                    .desired_width(120.0),
-            );
-        });
+            let pending = { self.io.state.lock().unwrap().preview_pending };
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let label = if self.side == Side::Buy {
+                    "Preview BUY"
+                } else {
+                    "Preview SELL"
+                };
+                if ui
+                    .add_enabled(!pending, egui::Button::new(RichText::new(label).strong()))
+                    .clicked()
+                {
+                    self.confirm_typed.clear();
+                    self.accept_unsuitable = false;
+                    let _ = self.io.tx.send(Cmd::PreviewTrade(self.intent()));
+                }
+                if pending {
+                    ui.spinner();
+                }
+            });
 
-        let pending = { self.io.state.lock().unwrap().preview_pending };
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let label = if self.side == Side::Buy {
-                "Preview BUY"
-            } else {
-                "Preview SELL"
-            };
-            if ui
-                .add_enabled(!pending, egui::Button::new(RichText::new(label).strong()))
-                .clicked()
-            {
-                self.confirm_typed.clear();
-                self.accept_unsuitable = false;
-                let _ = self.io.tx.send(Cmd::PreviewTrade(self.intent()));
+            let s = self.io.state.lock().unwrap();
+            if let Some(e) = &s.preview_error {
+                ui.label(RichText::new(e.clone()).color(RED));
             }
-            if pending {
-                ui.spinner();
+            if let Some(r) = &s.order_result {
+                ui.label(RichText::new(r.clone()).color(GREEN));
+            }
+            if let Some(e) = &s.order_error {
+                ui.label(RichText::new(e.clone()).color(RED));
             }
         });
-
-        let s = self.io.state.lock().unwrap();
-        if let Some(e) = &s.preview_error {
-            ui.label(RichText::new(e.clone()).color(RED));
-        }
-        if let Some(r) = &s.order_result {
-            ui.label(RichText::new(r.clone()).color(GREEN));
-        }
-        if let Some(e) = &s.order_error {
-            ui.label(RichText::new(e.clone()).color(RED));
-        }
     }
 
     fn central(&mut self, ui: &mut egui::Ui) {
