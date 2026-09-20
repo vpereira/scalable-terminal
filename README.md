@@ -192,6 +192,10 @@ Hence moving averages in calendar days rather than bars. A twenty bar average wo
 cargo test
 ```
 
+CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and a release build on every push and pull request, on macOS. The workflow is `.github/workflows/ci.yml`.
+
+The tests need neither `sc` nor a network connection, since they run entirely against the committed fixtures.
+
 Thirty two tests, running the extractors against real payloads captured from a live account with identifiers removed, in `tests/fixtures`. The JSON shapes are undocumented and can change, so a renamed field fails a test instead of quietly blanking a panel.
 
 They assert behaviour, not just field names. Securities plus cash reconcile to the reported total. Chart timestamps increase. Allocation weights sum to one. Candle aggregation satisfies the open, high, low, close relationships and accounts for every tick exactly once. A moving average matches a mean computed directly. An expired confirmation disarms submit. Free to sell quantity subtracts resting sells. `device_locked` is not classified as an auth failure. A watchlist refusal hidden inside an `ok` response is detected.
