@@ -4,6 +4,7 @@
 //! `sc::result()` before handing a value to these constructors.
 
 use crate::sc::{f64_at, pick, str_at};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 fn bool_at(v: &Value, path: &str) -> bool {
@@ -63,7 +64,7 @@ impl Performance {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Window {
     Day,
     Week,

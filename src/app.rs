@@ -76,6 +76,7 @@ pub struct App {
     tag_filter: Option<String>,
     tag_input: String,
     alert_price: f64,
+    prefs_saved: Option<std::time::Instant>,
     last_poll_set: Vec<String>,
     show_help: bool,
     /// Set when a shortcut asks for a text field; consumed on the next frame.
@@ -101,7 +102,9 @@ impl App {
             style.spacing.item_spacing = egui::vec2(6.0, 4.0);
         });
 
-        let poll = Arc::new(Mutex::new(Duration::from_secs(10)));
+        let workspace = Workspace::load();
+        let prefs = workspace.prefs.clone();
+        let poll = Arc::new(Mutex::new(Duration::from_secs_f32(prefs.poll_secs)));
         let io = worker::spawn(cc.egui_ctx.clone(), poll.clone());
         let _ = io.tx.send(Cmd::RefreshAll);
 
@@ -125,28 +128,33 @@ impl App {
             shot_started: None,
             shot_sent: false,
             poll,
-            poll_secs: 10.0,
-            resume_secs: 10.0,
+            poll_secs: prefs.poll_secs,
+            resume_secs: if prefs.poll_secs > 0.0 {
+                prefs.poll_secs
+            } else {
+                10.0
+            },
             selected: None,
             new_isin: String::new(),
             search_query: String::new(),
             tab,
-            timeframe: "1d".into(),
-            sma: [false, false, false],
-            candles: true,
-            bars_target: 90,
+            timeframe: prefs.timeframe.clone(),
+            sma: prefs.sma,
+            candles: prefs.candles,
+            bars_target: prefs.bars_target,
             deriv_type: 0,
             deriv_strategy: 0,
             deriv_underlying: None,
             trail_distance: 3.0,
             trail_percent: true,
-            workspace: Workspace::load(),
+            workspace,
             new_list: String::new(),
-            sort_by: Some(Window::Week),
-            sort_desc: true,
+            sort_by: prefs.sort_by,
+            sort_desc: prefs.sort_desc,
             tag_filter: None,
             tag_input: String::new(),
             alert_price: 0.0,
+            prefs_saved: None,
             last_poll_set: Vec::new(),
             show_help: help_on_start,
             focus_search: false,
@@ -246,6 +254,36 @@ impl App {
         };
         if let Some(isin) = first {
             self.select(isin);
+        }
+    }
+
+    /// Mirror the live interface state into the workspace, writing only when it
+    /// actually changed. Comparing a small struct once a frame is cheaper than
+    /// threading a save call through every widget that can alter a setting, and
+    /// it cannot miss one.
+    fn sync_prefs(&mut self) {
+        let current = crate::workspace::Prefs {
+            poll_secs: self.poll_secs,
+            timeframe: self.timeframe.clone(),
+            candles: self.candles,
+            sma: self.sma,
+            bars_target: self.bars_target,
+            sort_by: self.sort_by,
+            sort_desc: self.sort_desc,
+        };
+        if current == self.workspace.prefs {
+            return;
+        }
+        self.workspace.prefs = current;
+        // Dragging a slider changes the value every frame, so rate limit the
+        // write rather than hammering the disk.
+        let now = std::time::Instant::now();
+        if self
+            .prefs_saved
+            .is_none_or(|t| now.duration_since(t) > Duration::from_millis(750))
+        {
+            self.prefs_saved = Some(now);
+            self.workspace.save();
         }
     }
 
@@ -390,6 +428,8 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
+        // The debounce means the most recent change may not be on disk yet.
+        self.workspace.save();
         let _ = self.io.tx.send(Cmd::Shutdown);
     }
 
@@ -397,6 +437,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.drive_screenshot(&ctx);
         self.handle_shortcuts(&ctx);
+        self.sync_prefs();
         // Nothing completes during a backoff, so nothing would request a repaint
         // and the countdown would sit frozen until the mouse moved.
         if self.io.state.lock().unwrap().backoff_secs_left().is_some() {

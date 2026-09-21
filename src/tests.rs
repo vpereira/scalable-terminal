@@ -1251,3 +1251,96 @@ fn alert_distance_is_signed_towards_the_trigger() {
     assert!(up.distance(0.0).is_none());
     assert!(PriceAlert::default().distance(mid).is_none());
 }
+
+/// A stored file can hold anything, including values a newer build would never
+/// write. Trusting it would divide by zero or poll at an impossible rate.
+#[test]
+fn prefs_are_clamped_on_load() {
+    use crate::workspace::Prefs;
+
+    let mut p = Prefs {
+        poll_secs: -5.0,
+        bars_target: 0,
+        timeframe: "fortnight".into(),
+        ..Default::default()
+    };
+    p.repair();
+    assert_eq!(
+        p.poll_secs,
+        Prefs::default().poll_secs,
+        "negative interval rejected"
+    );
+    assert_eq!(p.bars_target, 20, "a zero bar target would divide by zero");
+    assert_eq!(p.timeframe, "1d", "unknown timeframe falls back");
+
+    // Absurd values are bounded rather than rejected outright.
+    let mut p = Prefs {
+        poll_secs: 1e9,
+        bars_target: 100_000,
+        ..Default::default()
+    };
+    p.repair();
+    assert_eq!(p.poll_secs, 3600.0);
+    assert_eq!(p.bars_target, 400);
+
+    // Not a number cannot survive, or the poll loop never runs again.
+    let mut p = Prefs {
+        poll_secs: f32::NAN,
+        ..Default::default()
+    };
+    p.repair();
+    assert!(p.poll_secs.is_finite());
+
+    // Zero is legitimate: it means paused.
+    let mut p = Prefs {
+        poll_secs: 0.0,
+        ..Default::default()
+    };
+    p.repair();
+    assert_eq!(p.poll_secs, 0.0);
+
+    // Every timeframe the chart offers must survive a round trip.
+    for tf in crate::worker::TIMEFRAMES {
+        let mut p = Prefs {
+            timeframe: tf.into(),
+            ..Default::default()
+        };
+        p.repair();
+        assert_eq!(p.timeframe, tf);
+    }
+}
+
+/// Preferences must survive a write and read, or nothing is actually persisted.
+#[test]
+fn prefs_round_trip_through_json() {
+    use crate::model::Window;
+    use crate::workspace::{Prefs, Workspace};
+
+    let mut w = Workspace {
+        prefs: Prefs {
+            poll_secs: 42.0,
+            timeframe: "3m".into(),
+            candles: false,
+            sma: [true, false, true],
+            bars_target: 120,
+            sort_by: Some(Window::Quarter),
+            sort_desc: false,
+        },
+        ..Default::default()
+    };
+    w.create("Momentum");
+    w.add_tag("AAA", "ai");
+
+    let text = serde_json::to_string(&w).unwrap();
+    let back: Workspace = serde_json::from_str(&text).unwrap();
+
+    assert_eq!(back.prefs, w.prefs);
+    assert_eq!(back.prefs.sort_by, Some(Window::Quarter));
+    assert_eq!(back.lists.len(), 1);
+    assert_eq!(back.tags_of("AAA"), ["ai"]);
+
+    // A file written before prefs existed must still load, with defaults.
+    let old = r#"{"lists":[],"active":"Broker"}"#;
+    let back: Workspace = serde_json::from_str(old).unwrap();
+    assert_eq!(back.prefs, Prefs::default());
+}

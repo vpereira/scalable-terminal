@@ -5,6 +5,7 @@
 //! later tags and notes. Kept separate so a broker refresh can never discard
 //! local work, and local edits can never be mistaken for account state.
 
+use crate::model::Window;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -63,6 +64,51 @@ impl WatchList {
     }
 }
 
+/// Interface preferences. Kept beside the lists because they are local state
+/// the broker knows nothing about, and losing them on every restart is the
+/// difference between a tool and a demo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Prefs {
+    /// Seconds between quote rounds. Zero means paused.
+    pub poll_secs: f32,
+    pub timeframe: String,
+    pub candles: bool,
+    pub sma: [bool; 3],
+    pub bars_target: usize,
+    pub sort_by: Option<Window>,
+    pub sort_desc: bool,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs {
+            poll_secs: 10.0,
+            timeframe: "1d".into(),
+            candles: true,
+            sma: [false, false, false],
+            bars_target: 90,
+            sort_by: Some(Window::Week),
+            sort_desc: true,
+        }
+    }
+}
+
+impl Prefs {
+    /// A stored file can hold values a newer build would never write, so clamp
+    /// rather than trust. A zero bar target would divide by zero downstream.
+    pub fn repair(&mut self) {
+        if !self.poll_secs.is_finite() || self.poll_secs < 0.0 {
+            self.poll_secs = Prefs::default().poll_secs;
+        }
+        self.poll_secs = self.poll_secs.min(3600.0);
+        self.bars_target = self.bars_target.clamp(20, 400);
+        if !crate::worker::TIMEFRAMES.contains(&self.timeframe.as_str()) {
+            self.timeframe = Prefs::default().timeframe;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
     pub lists: Vec<WatchList>,
@@ -71,6 +117,8 @@ pub struct Workspace {
     /// so grouping has to come from here. Sorted and deduplicated on write.
     #[serde(default)]
     pub tags: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub prefs: Prefs,
 }
 
 impl Default for Workspace {
@@ -80,6 +128,7 @@ impl Default for Workspace {
             lists: Vec::new(),
             active: ListId::Broker,
             tags: BTreeMap::new(),
+            prefs: Prefs::default(),
         }
     }
 }
@@ -119,6 +168,7 @@ impl Workspace {
         {
             self.active = ListId::Broker;
         }
+        self.prefs.repair();
     }
 
     pub fn tags_of(&self, isin: &str) -> &[String] {

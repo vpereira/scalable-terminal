@@ -134,6 +134,26 @@ That combination is the point. Tag a theme, filter to it, rank by 1M, and the le
 
 Tags live in `workspace.json` alongside the lists.
 
+## Settings
+
+Interface preferences persist in the same file, under `prefs`:
+
+```json
+"prefs": {
+  "poll_secs": 45.0,
+  "timeframe": "3m",
+  "candles": false,
+  "sma": [true, false, true],
+  "bars_target": 140,
+  "sort_by": "Quarter",
+  "sort_desc": false
+}
+```
+
+Refresh interval, chart type, timeframe, moving average toggles, bar density and the ranking column all survive a restart. There is no settings dialog: change them where they live, in the top bar and the chart toolbar, and they are written as you go.
+
+Writes are debounced, so dragging the interval does not hammer the disk, and the file is flushed on exit so the last change is never lost. Values are clamped on load rather than trusted, because a stored zero bar count or a negative interval would break the poll loop.
+
 ## Screen notes
 
 Switching lists prices whatever is newly on screen straight away rather than waiting for the next poll, and instrument names are remembered from every endpoint that reports one, so a row that has no quote yet still says what it is and shows a waiting marker instead of a line of dashes.
