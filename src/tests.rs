@@ -1189,3 +1189,65 @@ fn quote_keeps_every_performance_window() {
     let seeded = Quote::from_watchlist_item(&serde_json::json!({"isin": "X"}));
     assert!(Window::ALL.iter().all(|w| seeded.perf.get(*w).is_none()));
 }
+
+const ALERTS: &str = include_str!("../tests/fixtures/price-alerts.json");
+
+/// Direction is derived by the broker from where the price sits at creation, so
+/// the extractor must carry it rather than the UI inferring its own.
+#[test]
+fn price_alerts_extract_direction_and_state() {
+    let data = envelope(ALERTS);
+    let alerts = PriceAlert::list_from(sc::result(&data));
+
+    assert_eq!(alerts.len(), 2);
+    assert!(
+        alerts.iter().all(|a| !a.id.is_empty()),
+        "an alert with no id cannot be removed"
+    );
+    assert!(alerts.iter().all(|a| a.isin == "IE00B8GKDB10"));
+    assert!(alerts.iter().all(|a| a.active));
+    assert!(alerts.iter().all(|a| !a.has_triggered()));
+
+    // Above the market fires UP, below fires DOWN.
+    let up = alerts
+        .iter()
+        .find(|a| a.direction == "UP")
+        .expect("an up alert");
+    let down = alerts
+        .iter()
+        .find(|a| a.direction == "DOWN")
+        .expect("a down alert");
+    assert!(close(up.price.unwrap(), 999.0));
+    assert!(close(down.price.unwrap(), 10.0));
+    assert!(up.price > down.price, "UP sits above DOWN");
+    assert_eq!(up.security_type, "ETF");
+    assert!(!up.name.is_empty());
+}
+
+/// The distance is what tells you whether an alert is near firing. Its sign has
+/// to match the direction, or a far away alert could read as imminent.
+#[test]
+fn alert_distance_is_signed_towards_the_trigger() {
+    let data = envelope(ALERTS);
+    let alerts = PriceAlert::list_from(sc::result(&data));
+    let mid = 80.9;
+
+    let up = alerts.iter().find(|a| a.direction == "UP").unwrap();
+    let down = alerts.iter().find(|a| a.direction == "DOWN").unwrap();
+
+    let du = up.distance(mid).unwrap();
+    let dd = down.distance(mid).unwrap();
+    assert!(du > 0.0, "an UP alert is above the market");
+    assert!(dd < 0.0, "a DOWN alert is below it");
+
+    // An alert sitting at the market has no distance left to travel.
+    let at = PriceAlert {
+        price: Some(mid),
+        ..Default::default()
+    };
+    assert!(close(at.distance(mid).unwrap(), 0.0));
+
+    // No usable mid yields no distance rather than a divide by zero.
+    assert!(up.distance(0.0).is_none());
+    assert!(PriceAlert::default().distance(mid).is_none());
+}

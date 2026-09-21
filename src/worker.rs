@@ -80,6 +80,11 @@ pub enum Cmd {
         accept_unsuitable: bool,
     },
     CancelOrder(String),
+    AddAlert {
+        isin: String,
+        price: f64,
+    },
+    RemoveAlert(String),
     ClearPreview,
     Shutdown,
 }
@@ -164,6 +169,8 @@ pub struct Shared {
     pub names: HashMap<String, String>,
     pub holdings: Vec<Holding>,
     pub orders: Vec<PendingOrder>,
+    pub alerts: Vec<PriceAlert>,
+    pub alert_error: Option<String>,
     pub account: Account,
     pub analytics: Analytics,
     pub overview_raw: Value,
@@ -479,6 +486,36 @@ fn handle(state: &Arc<Mutex<Shared>>, cmd: Cmd) {
             log_call(state, "trade.cancel", &call, &id);
             refresh_account(state);
         }
+        Cmd::AddAlert { isin, price } => {
+            let call = sc::run(&[
+                "broker",
+                "price-alerts",
+                "add",
+                "--isin",
+                &isin,
+                "--price",
+                &fmt_num(price),
+            ]);
+            {
+                let mut s = state.lock().unwrap();
+                match &call.data {
+                    // The add response already carries the full list for that
+                    // instrument, but only for that one, so refresh properly.
+                    Ok(_) => s.alert_error = None,
+                    Err(e) => s.alert_error = Some(e.to_string()),
+                }
+            }
+            log_call(state, "price-alerts.add", &call, &isin);
+            refresh_alerts(state);
+        }
+        Cmd::RemoveAlert(id) => {
+            let call = sc::run(&["broker", "price-alerts", "remove", "--alert-id", &id]);
+            if let Err(e) = &call.data {
+                state.lock().unwrap().alert_error = Some(e.to_string());
+            }
+            log_call(state, "price-alerts.remove", &call, &id);
+            refresh_alerts(state);
+        }
         Cmd::ClearPreview => {
             let mut s = state.lock().unwrap();
             s.preview = None;
@@ -550,20 +587,23 @@ fn check_session(state: &Arc<Mutex<Shared>>) {
 fn refresh_account(state: &Arc<Mutex<Shared>>) {
     // Five independent endpoints. Serially that is ~1 s on every refresh, and a
     // refresh follows every submit and cancel — so fan them out.
-    let (mut ov, mut cash, mut hd, mut tx, mut an) = (None, None, None, None, None);
+    let (mut ov, mut cash, mut hd, mut tx, mut an, mut al) = (None, None, None, None, None, None);
     std::thread::scope(|scope| {
         let a = scope.spawn(|| sc::run(&["broker", "overview"]));
         let b = scope.spawn(|| sc::run(&["broker", "cash-breakdown"]));
         let c = scope.spawn(|| sc::run(&["broker", "holdings"]));
         let d = scope.spawn(|| sc::run(&["broker", "transactions"]));
         let e = scope.spawn(|| sc::run(&["broker", "analytics"]));
+        let f = scope.spawn(|| sc::run(&["broker", "price-alerts"]));
         ov = a.join().ok();
         cash = b.join().ok();
         hd = c.join().ok();
         tx = d.join().ok();
         an = e.join().ok();
+        al = f.join().ok();
     });
-    let (Some(ov), Some(cash), Some(hd), Some(tx), Some(an)) = (ov, cash, hd, tx, an) else {
+    let (Some(ov), Some(cash), Some(hd), Some(tx), Some(an), Some(al)) = (ov, cash, hd, tx, an, al)
+    else {
         state
             .lock()
             .unwrap()
@@ -658,6 +698,47 @@ fn refresh_account(state: &Arc<Mutex<Shared>>) {
             false,
             e.to_string(),
         ),
+    }
+    match &al.data {
+        Ok(v) => {
+            s.alerts = PriceAlert::list_from(sc::result(v));
+            let n = s.alerts.len();
+            s.push_log(
+                "price-alerts",
+                al.elapsed.as_millis(),
+                true,
+                format!("{n} alerts"),
+            );
+        }
+        Err(e) => s.push_log("price-alerts", al.elapsed.as_millis(), false, e.to_string()),
+    }
+}
+
+fn refresh_alerts(state: &Arc<Mutex<Shared>>) {
+    let call = sc::run(&["broker", "price-alerts"]);
+    let mut s = state.lock().unwrap();
+    match &call.data {
+        Ok(v) => {
+            s.alerts = PriceAlert::list_from(sc::result(v));
+            let n = s.alerts.len();
+            s.push_log(
+                "price-alerts",
+                call.elapsed.as_millis(),
+                true,
+                format!("{n} alerts"),
+            );
+        }
+        Err(e) => {
+            if e.kind == sc::ScErrorKind::RateLimited {
+                s.note_rate_limit("price-alerts");
+            }
+            s.push_log(
+                "price-alerts",
+                call.elapsed.as_millis(),
+                false,
+                e.to_string(),
+            );
+        }
     }
 }
 

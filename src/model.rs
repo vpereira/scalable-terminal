@@ -938,3 +938,52 @@ impl Trail {
         (mid > 0.0 && stop > 0.0).then(|| (mid - stop) / mid)
     }
 }
+
+/// A broker side price alert.
+///
+/// Direction is not something you choose: the broker derives UP or DOWN from
+/// where the price sits relative to the market when the alert is created.
+#[derive(Debug, Clone, Default)]
+pub struct PriceAlert {
+    pub id: String,
+    pub isin: String,
+    pub name: String,
+    pub security_type: String,
+    pub price: Option<f64>,
+    pub direction: String,
+    pub active: bool,
+    pub triggered: String,
+}
+
+impl PriceAlert {
+    pub fn list_from(v: &Value) -> Vec<PriceAlert> {
+        pick(v, &["items"])
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|i| PriceAlert {
+                        id: str_at(i, &["alert_id"]).unwrap_or_default(),
+                        isin: str_at(i, &["isin"]).unwrap_or_default(),
+                        name: str_at(i, &["name"]).unwrap_or_default(),
+                        security_type: str_at(i, &["security_type"]).unwrap_or_default(),
+                        price: f64_at(i, &["price"]),
+                        direction: str_at(i, &["direction"]).unwrap_or_default(),
+                        active: bool_at(i, "is_active"),
+                        triggered: str_at(i, &["triggered_timestamp_utc"]).unwrap_or_default(),
+                    })
+                    .filter(|a| !a.id.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn has_triggered(&self) -> bool {
+        !self.triggered.is_empty()
+    }
+
+    /// How far the market still has to travel, as a fraction of the mid.
+    pub fn distance(&self, mid: f64) -> Option<f64> {
+        let p = self.price?;
+        (mid > 0.0).then(|| (p - mid) / mid)
+    }
+}

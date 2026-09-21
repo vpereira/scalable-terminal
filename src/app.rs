@@ -75,6 +75,7 @@ pub struct App {
     sort_desc: bool,
     tag_filter: Option<String>,
     tag_input: String,
+    alert_price: f64,
     last_poll_set: Vec<String>,
     show_help: bool,
     /// Set when a shortcut asks for a text field; consumed on the next frame.
@@ -145,6 +146,7 @@ impl App {
             sort_desc: true,
             tag_filter: None,
             tag_input: String::new(),
+            alert_price: 0.0,
             last_poll_set: Vec::new(),
             show_help: help_on_start,
             focus_search: false,
@@ -1240,6 +1242,7 @@ impl App {
 
                     self.positions(ui);
                     self.orders(ui);
+                    self.alerts(ui);
                     self.trails(ui);
                     self.ticket(ui);
                 });
@@ -1411,6 +1414,121 @@ impl App {
         }
         if let Some(id) = cancel {
             let _ = self.io.tx.send(Cmd::CancelOrder(id));
+        }
+    }
+
+    /// Broker side price alerts. Direction is not a choice: the broker derives
+    /// UP or DOWN from where the price sits when the alert is created.
+    fn alerts(&mut self, ui: &mut egui::Ui) {
+        let (alerts, quotes, err) = {
+            let s = self.io.state.lock().unwrap();
+            (s.alerts.clone(), s.quotes.clone(), s.alert_error.clone())
+        };
+
+        let triggered = alerts.iter().filter(|a| a.has_triggered()).count();
+        let title = if triggered > 0 {
+            format!("Price alerts ({}, {triggered} triggered)", alerts.len())
+        } else {
+            format!("Price alerts ({})", alerts.len())
+        };
+
+        let mut remove: Option<String> = None;
+        let mut add: Option<(String, f64)> = None;
+        let mut pick: Option<String> = None;
+
+        section(ui, &title, None, |ui| {
+            if let Some(e) = &err {
+                ui.label(RichText::new(e).color(RED));
+            }
+
+            if let Some(isin) = self.selected.clone() {
+                let mid = quotes.get(&isin).and_then(|q| q.mid);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&isin).monospace().small());
+                    ui.add(
+                        egui::DragValue::new(&mut self.alert_price)
+                            .speed(0.01)
+                            .range(0.0..=1e9),
+                    );
+                    if let Some(m) = mid {
+                        if ui.small_button("mid").clicked() {
+                            self.alert_price = m;
+                        }
+                        // Say which way it will fire, since the broker decides.
+                        if self.alert_price > 0.0 {
+                            let dir = if self.alert_price > m { "UP" } else { "DOWN" };
+                            ui.label(
+                                RichText::new(format!("fires {dir}"))
+                                    .color(if dir == "UP" { GREEN } else { RED })
+                                    .small(),
+                            );
+                        }
+                    }
+                    if ui
+                        .add_enabled(self.alert_price > 0.0, egui::Button::new("add alert"))
+                        .clicked()
+                    {
+                        add = Some((isin.clone(), self.alert_price));
+                    }
+                });
+            } else {
+                ui.label(RichText::new("select an instrument to add one").color(DIM));
+            }
+
+            if alerts.is_empty() {
+                ui.label(RichText::new("none set").color(DIM));
+            }
+
+            for a in &alerts {
+                ui.horizontal(|ui| {
+                    let c = if a.direction == "UP" { GREEN } else { RED };
+                    ui.label(RichText::new(&a.direction).color(c).monospace().small());
+                    if ui
+                        .selectable_label(
+                            self.selected.as_deref() == Some(a.isin.as_str()),
+                            RichText::new(&a.isin).monospace(),
+                        )
+                        .on_hover_text(format!("{}\n{}", a.name, a.security_type))
+                        .clicked()
+                    {
+                        pick = Some(a.isin.clone());
+                    }
+                    ui.label(RichText::new(num(a.price, 4)).monospace().strong());
+
+                    if a.has_triggered() {
+                        ui.label(RichText::new("TRIGGERED").color(AMBER).strong())
+                            .on_hover_text(&a.triggered);
+                    } else if let Some(d) = quotes
+                        .get(&a.isin)
+                        .and_then(|q| q.mid)
+                        .and_then(|m| a.distance(m))
+                    {
+                        // How far the market still has to travel to fire it.
+                        ui.label(
+                            RichText::new(format!("{:+.1}%", d * 100.0))
+                                .color(DIM)
+                                .monospace(),
+                        );
+                    }
+                    if !a.active {
+                        ui.label(RichText::new("inactive").color(DIM).small());
+                    }
+                    if ui.small_button("x").clicked() {
+                        remove = Some(a.id.clone());
+                    }
+                });
+            }
+        });
+
+        if let Some(p) = pick {
+            self.select(p);
+        }
+        if let Some((isin, price)) = add {
+            let _ = self.io.tx.send(Cmd::AddAlert { isin, price });
+            self.alert_price = 0.0;
+        }
+        if let Some(id) = remove {
+            let _ = self.io.tx.send(Cmd::RemoveAlert(id));
         }
     }
 
@@ -1595,9 +1713,7 @@ impl App {
         section(ui, "Order ticket", None, |ui| {
             let isin = self.selected.clone().unwrap_or_default();
             if isin.is_empty() {
-                section(ui, "Order ticket", None, |ui| {
-                    ui.label(RichText::new("select an instrument").color(DIM));
-                });
+                ui.label(RichText::new("select an instrument").color(DIM));
                 return;
             }
             let (q, held, working) = {

@@ -168,6 +168,14 @@ Selling sizes by shares, with all and half buttons computed from shares that are
 
 `max_order_notional`, `allowed_isins` and `denied_isins` in the CLI's `config.toml` are enforced by the CLI, which is a better place for a hard limit than this app.
 
+## Price alerts
+
+Broker side alerts, from `broker price-alerts`. Select an instrument, set a price, add. The list shows each alert with how far the market still has to move to reach it, and flags any that have fired.
+
+Direction is not a choice. The broker derives UP or DOWN from where the price sits relative to the market when the alert is created, so the panel shows which way it will fire before you commit rather than offering a control that does nothing.
+
+Unlike trailing stops, these live at the broker, so they work with the terminal closed.
+
 ## Trailing stops
 
 The CLI has no trailing order type and no amend command, so a trail cannot be handed to the broker. It is imitated: track the high water mark, and when the resting stop falls behind, cancel it and place a new one higher.
