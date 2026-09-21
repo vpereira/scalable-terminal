@@ -164,7 +164,7 @@ Main area:
 
 * Chart. Candles or line, previous close as a dashed baseline. Timeframes 1d, 7d, 1m, 3m, 6m, ytd, 1y, max. Moving averages at 20, 50 and 200 days.
 * Derivatives. Knockouts, factor certificates and warrants on whatever instrument you last clicked, filtered by family and direction. Leverage, strike, knockout barrier, distance to barrier, premium, expiry. Clicking a row makes that derivative the active instrument.
-* Portfolio. Totals, return per timeframe, holdings with weight and profit, allocation by product type, asset class, sector and region, diversification scores, stress scenarios against a benchmark.
+* Portfolio. Totals, return per timeframe, holdings with weight and profit, allocation by product type, asset class, sector and region, diversification scores, a style grid, income and credit quality, and stress scenarios against a benchmark.
 * Log. Every `sc` invocation, timed.
 * Raw. The unmodified JSON behind each endpoint.
 
@@ -199,6 +199,23 @@ Preview runs phase one. The dialog shows the whole disclosure: shares, estimated
 Selling sizes by shares, with all and half buttons computed from shares that are genuinely free. The broker reports `blocked_quantity` as zero even for a position entirely committed to a resting sell, so sizing from quantity minus blocked would offer shares already on the market. Resting sells are subtracted here instead.
 
 `max_order_notional`, `allowed_isins` and `denied_isins` in the CLI's `config.toml` are enforced by the CLI, which is a better place for a hard limit than this app.
+
+## Style, income and credit
+
+`broker analytics` carries more than the allocation and stress views suggest, and the rest was being discarded. Three additions, all from a call the app already makes on every refresh, so they cost nothing.
+
+The style grid crosses market cap with value, blend and growth, with row and column totals. Hovering a cell names the holdings in it, which is what makes it worth reading rather than decorative:
+
+```
+          VALUE   BLEND  GROWTH   total
+LARGE     19.4%   13.7%      ·    33.1%
+SMALL     58.9%      ·     8.0%   66.9%
+total     78.3%   13.7%    8.0%
+```
+
+Income shows distributions and interest received. Credit quality counts bonds by investment grade, speculative and unrated, and surfaces the broker's own speculative exposure warning.
+
+Both sections hide themselves when there is nothing to show, since an all zero income line and three empty bond buckets tell you less than their absence does.
 
 ## Price alerts
 

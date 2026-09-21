@@ -585,6 +585,18 @@ pub struct AllocSlice {
     pub subs: Vec<AllocSlice>,
 }
 
+/// One cell of the style grid: a market cap band crossed with a style, and the
+/// instruments sitting in it.
+#[derive(Debug, Clone, Default)]
+pub struct StyleCell {
+    /// LARGE, MID or SMALL.
+    pub cap: String,
+    /// VALUE, BLEND or GROWTH.
+    pub style: String,
+    pub weight: f64,
+    pub holdings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Analytics {
     /// (PRODUCT_TYPE | ASSET_CLASS | EQUITY_SECTOR | REGION, slices)
@@ -593,10 +605,47 @@ pub struct Analytics {
     pub health: Vec<(String, f64, String, i64, i64)>,
     /// (scenario, portfolio_performance, benchmark_performance)
     pub scenarios: Vec<(String, f64, f64)>,
+    /// Market cap crossed with value, blend or growth.
+    pub styles: Vec<StyleCell>,
+    /// Income received: distributions and interest.
+    pub distributions: Option<f64>,
+    pub interest: Option<f64>,
+    /// Bond credit quality, counted per bucket.
+    pub investment_grade: usize,
+    pub speculative_grade: usize,
+    pub unrated_grade: usize,
+    pub speculative_warning: bool,
     pub last_updated: String,
 }
 
+pub const CAPS: [&str; 3] = ["LARGE", "MID", "SMALL"];
+pub const STYLES: [&str; 3] = ["VALUE", "BLEND", "GROWTH"];
+
 impl Analytics {
+    /// The weight in one cell of the cap by style grid, if anything sits there.
+    pub fn style_cell(&self, cap: &str, style: &str) -> Option<&StyleCell> {
+        self.styles
+            .iter()
+            .find(|c| c.cap == cap && c.style == style)
+    }
+
+    /// Share of the equity book in one cap band, across all styles.
+    pub fn cap_weight(&self, cap: &str) -> f64 {
+        self.styles
+            .iter()
+            .filter(|c| c.cap == cap)
+            .map(|c| c.weight)
+            .sum()
+    }
+
+    pub fn style_total(&self, style: &str) -> f64 {
+        self.styles
+            .iter()
+            .filter(|c| c.style == style)
+            .map(|c| c.weight)
+            .sum()
+    }
+
     pub fn from_json(v: &Value) -> Analytics {
         let slice = |p: &Value| AllocSlice {
             name: str_at(p, &["name"]).unwrap_or_default(),
@@ -664,6 +713,58 @@ impl Analytics {
                         .collect()
                 })
                 .unwrap_or_default(),
+            styles: pick(v, &["equity_company_styles/market_caps"])
+                .and_then(Value::as_array)
+                .map(|caps| {
+                    caps.iter()
+                        .flat_map(|c| {
+                            let cap = str_at(c, &["type"]).unwrap_or_default();
+                            pick(c, &["items"])
+                                .and_then(Value::as_array)
+                                .map(|items| {
+                                    items
+                                        .iter()
+                                        .map(|i| StyleCell {
+                                            cap: cap.clone(),
+                                            style: str_at(i, &["type"]).unwrap_or_default(),
+                                            weight: f64_at(i, &["weight"]).unwrap_or(0.0),
+                                            holdings: pick(i, &["contributors"])
+                                                .and_then(Value::as_array)
+                                                .map(|cs| {
+                                                    cs.iter()
+                                                        .filter_map(|x| {
+                                                            str_at(x, &["underlying_asset/name"])
+                                                        })
+                                                        .collect()
+                                                })
+                                                .unwrap_or_default(),
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default()
+                        })
+                        .filter(|c| !c.cap.is_empty() && !c.style.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            distributions: f64_at(v, &["payments/total_distributions"]),
+            interest: f64_at(v, &["payments/total_interest"]),
+            investment_grade: pick(v, &["fixed_income_ratings/investment_grade"])
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .unwrap_or(0),
+            speculative_grade: pick(v, &["fixed_income_ratings/speculative_grade"])
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .unwrap_or(0),
+            unrated_grade: pick(v, &["fixed_income_ratings/unrated_grade"])
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .unwrap_or(0),
+            speculative_warning: bool_at(
+                v,
+                "fixed_income_ratings/show_speculative_investment_warning",
+            ),
             last_updated: str_at(v, &["last_updated_utc"]).unwrap_or_default(),
         }
     }

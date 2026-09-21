@@ -1395,3 +1395,72 @@ fn news_with_no_coverage_is_empty_not_an_error() {
     // A fully absent payload must not panic either.
     assert!(SecurityNews::from_json(&serde_json::json!({})).is_empty());
 }
+
+/// The style grid is cap crossed with value, blend or growth. Contributors name
+/// which holding sits in each cell, which is what makes the grid actionable
+/// rather than decorative.
+#[test]
+fn analytics_extracts_the_style_grid() {
+    use crate::model::{CAPS, STYLES};
+
+    let data = envelope(ANALYTICS);
+    let a = Analytics::from_json(sc::result(&data));
+
+    assert_eq!(a.styles.len(), 3);
+    for c in &a.styles {
+        assert!(CAPS.contains(&c.cap.as_str()), "unexpected cap {:?}", c.cap);
+        assert!(
+            STYLES.contains(&c.style.as_str()),
+            "unexpected style {:?}",
+            c.style
+        );
+        assert!(c.weight > 0.0);
+        assert!(
+            !c.holdings.is_empty(),
+            "a cell with weight must name its holdings"
+        );
+    }
+
+    let large_value = a.style_cell("LARGE", "VALUE").expect("large value");
+    assert!((large_value.weight - 0.4917647059).abs() < 1e-9);
+    assert_eq!(large_value.holdings, ["Kansai El. Power"]);
+
+    let small_growth = a.style_cell("SMALL", "GROWTH").expect("small growth");
+    assert_eq!(small_growth.holdings, ["Liberty Gold"]);
+
+    // Empty cells are absent rather than zero weight entries.
+    assert!(a.style_cell("MID", "VALUE").is_none());
+    assert!(a.style_cell("SMALL", "VALUE").is_none());
+
+    // Margins agree with the cells, and the whole grid sums to the book.
+    assert!((a.cap_weight("LARGE") - 0.8063235296).abs() < 1e-9);
+    assert!((a.style_total("VALUE") - 0.4917647059).abs() < 1e-9);
+    let total: f64 = a.styles.iter().map(|c| c.weight).sum();
+    assert!(
+        (total - 1.0).abs() < 1e-6,
+        "grid covers the equity book, got {total}"
+    );
+}
+
+/// Income and credit quality come from the same payload and were being thrown
+/// away. Absent buckets must read as zero rather than as missing data.
+#[test]
+fn analytics_extracts_income_and_credit_buckets() {
+    let data = envelope(ANALYTICS);
+    let a = Analytics::from_json(sc::result(&data));
+
+    assert_eq!(a.distributions, Some(0.0));
+    assert_eq!(a.interest, Some(0.0));
+
+    // This portfolio holds no bonds, so every bucket is empty.
+    assert_eq!(a.investment_grade, 0);
+    assert_eq!(a.speculative_grade, 0);
+    assert_eq!(a.unrated_grade, 0);
+    assert!(!a.speculative_warning);
+
+    // A payload with no analytics at all must not panic or invent values.
+    let empty = Analytics::from_json(&serde_json::json!({}));
+    assert!(empty.styles.is_empty());
+    assert_eq!(empty.distributions, None);
+    assert_eq!(empty.investment_grade, 0);
+}

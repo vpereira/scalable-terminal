@@ -2174,6 +2174,117 @@ impl App {
                 }
             }
 
+            if !analytics.styles.is_empty() {
+                ui.add_space(10.0);
+                ui.separator();
+                ui.heading("Style");
+                ui.label(
+                    RichText::new("equity book by market cap and value or growth tilt")
+                        .color(DIM)
+                        .small(),
+                );
+                egui::Grid::new("styles")
+                    .num_columns(5)
+                    .spacing([16.0, 3.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("");
+                        for st in crate::model::STYLES {
+                            ui.label(RichText::new(st).strong());
+                        }
+                        ui.label(RichText::new("total").color(DIM));
+                        ui.end_row();
+
+                        for cap in crate::model::CAPS {
+                            let row_total = analytics.cap_weight(cap);
+                            // An empty band says nothing; leave it out.
+                            if row_total <= 0.0 {
+                                continue;
+                            }
+                            ui.label(RichText::new(cap).strong());
+                            for st in crate::model::STYLES {
+                                match analytics.style_cell(cap, st) {
+                                    Some(c) => {
+                                        ui.label(
+                                            RichText::new(format!("{:.1}%", c.weight * 100.0))
+                                                .monospace()
+                                                .color(BLUE),
+                                        )
+                                        .on_hover_text(c.holdings.join("\n"));
+                                    }
+                                    None => {
+                                        ui.label(RichText::new("·").color(DIM));
+                                    }
+                                }
+                            }
+                            ui.label(
+                                RichText::new(format!("{:.1}%", row_total * 100.0)).monospace(),
+                            );
+                            ui.end_row();
+                        }
+
+                        ui.label(RichText::new("total").color(DIM));
+                        for st in crate::model::STYLES {
+                            ui.label(
+                                RichText::new(format!("{:.1}%", analytics.style_total(st) * 100.0))
+                                    .monospace()
+                                    .color(DIM),
+                            );
+                        }
+                        ui.label("");
+                        ui.end_row();
+                    });
+            }
+
+            let has_income = analytics.distributions.unwrap_or(0.0) != 0.0
+                || analytics.interest.unwrap_or(0.0) != 0.0;
+            let has_bonds =
+                analytics.investment_grade + analytics.speculative_grade + analytics.unrated_grade
+                    > 0;
+            if has_income || has_bonds {
+                ui.add_space(10.0);
+                ui.separator();
+                ui.heading("Income and credit");
+                if has_income {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("distributions").color(DIM));
+                        ui.label(RichText::new(num(analytics.distributions, 2)).monospace());
+                        ui.separator();
+                        ui.label(RichText::new("interest").color(DIM));
+                        ui.label(RichText::new(num(analytics.interest, 2)).monospace());
+                    });
+                }
+                if has_bonds {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("investment grade").color(DIM));
+                        ui.label(
+                            RichText::new(analytics.investment_grade.to_string())
+                                .color(GREEN)
+                                .monospace(),
+                        );
+                        ui.label(RichText::new("speculative").color(DIM));
+                        ui.label(
+                            RichText::new(analytics.speculative_grade.to_string())
+                                .color(AMBER)
+                                .monospace(),
+                        );
+                        ui.label(RichText::new("unrated").color(DIM));
+                        ui.label(
+                            RichText::new(analytics.unrated_grade.to_string())
+                                .color(DIM)
+                                .monospace(),
+                        );
+                    });
+                    if analytics.speculative_warning {
+                        ui.label(
+                            RichText::new("the broker flags speculative grade exposure here")
+                                .color(AMBER)
+                                .small(),
+                        );
+                    }
+                }
+            }
+
             if !analytics.scenarios.is_empty() {
                 ui.add_space(10.0);
                 ui.separator();
