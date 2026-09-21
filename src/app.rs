@@ -737,12 +737,13 @@ impl App {
             .min_size(120.0)
             .max_size(600.0)
             .show(ui, |ui| {
-            let (watchlist, holdings, quotes, wl_error) = {
+            let (watchlist, holdings, quotes, names, wl_error) = {
                 let s = self.io.state.lock().unwrap();
                 (
                     s.watchlist.clone(),
                     s.holdings.clone(),
                     s.quotes.clone(),
+                    s.names.clone(),
                     s.watchlist_error.clone(),
                 )
             };
@@ -904,13 +905,14 @@ impl App {
             let rows: Vec<(Quote, bool)> = ordered
                 .iter()
                 .map(|(i, held)| {
-                    (
-                        quotes
-                            .get(i)
-                            .cloned()
-                            .unwrap_or(Quote { isin: i.clone(), ..Default::default() }),
-                        *held,
-                    )
+                    let q = quotes.get(i).cloned().unwrap_or_else(|| Quote {
+                        isin: i.clone(),
+                        // Fall back to a remembered name, so an unpriced row is
+                        // identifiable rather than a line of dashes.
+                        name: names.get(i).cloned().unwrap_or_default(),
+                        ..Default::default()
+                    });
+                    (q, *held)
                 })
                 .collect();
 
@@ -958,7 +960,8 @@ impl App {
                             } else if q.bid.is_some() {
                                 ui.label(RichText::new("·").color(GREEN));
                             } else {
-                                ui.label(RichText::new("·").color(DIM));
+                                ui.label(RichText::new("\u{2026}").color(DIM))
+                                    .on_hover_text("waiting for the first quote");
                             }
                         });
                         row.col(|ui| {

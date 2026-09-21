@@ -1088,3 +1088,40 @@ fn rows_and_poll_set_cover_the_right_instruments() {
         "deduplicated"
     );
 }
+
+/// A row with no quote yet must still say what it is. Names come from whichever
+/// endpoint answered first, and an instrument's name does not change, so the
+/// cache is safe to keep and reuse.
+#[test]
+fn names_are_learned_from_every_endpoint() {
+    let mut names: std::collections::HashMap<String, String> = Default::default();
+
+    // From the broker watchlist.
+    let wl = envelope(WATCHLIST);
+    for i in sc::result(&wl)["items"].as_array().unwrap() {
+        let q = Quote::from_watchlist_item(i);
+        if !q.name.is_empty() {
+            names.insert(q.isin.clone(), q.name.clone());
+        }
+    }
+    assert!(names.contains_key("IE00B8GKDB10"));
+    assert_eq!(
+        names["IE00B8GKDB10"],
+        "Vanguard FTSE All-World High Dividend Yield (Dist)"
+    );
+
+    // From holdings.
+    let hd = envelope(HOLDINGS);
+    for h in Holding::list_from(sc::result(&hd)) {
+        names.insert(h.isin.clone(), h.name.clone());
+    }
+    assert_eq!(names["JP3228600007"], "Kansai El. Power");
+
+    // From a full quote.
+    let q = Quote::from_json("CA53056H1047", sc::result(&envelope(QUOTE)));
+    names.insert(q.isin.clone(), q.name.clone());
+    assert_eq!(names["CA53056H1047"], "Liberty Gold");
+
+    // Every name learned is non empty, or the fallback is pointless.
+    assert!(names.values().all(|n| !n.is_empty()));
+}

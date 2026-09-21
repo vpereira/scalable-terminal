@@ -159,6 +159,9 @@ pub struct Shared {
     pub watchlist: Vec<String>,
     pub poll_set: Vec<String>,
     pub quotes: HashMap<String, Quote>,
+    /// Instrument names learned from any endpoint. A name does not change, so
+    /// caching it keeps a row identifiable when its quote is missing.
+    pub names: HashMap<String, String>,
     pub holdings: Vec<Holding>,
     pub orders: Vec<PendingOrder>,
     pub account: Account,
@@ -365,7 +368,23 @@ fn handle(state: &Arc<Mutex<Shared>>, cmd: Cmd) {
             refresh_quotes(state, &list);
         }
         Cmd::SetPollSet(set) => {
-            state.lock().unwrap().poll_set = set;
+            // Anything newly on screen has no quote yet. Waiting for the next
+            // tick leaves a row of dashes for up to a whole poll interval, which
+            // at 90 seconds looks like a broken instrument.
+            let fresh: Vec<String> = {
+                let mut s = state.lock().unwrap();
+                s.poll_set = set.clone();
+                set.iter()
+                    .filter(|i| !s.quotes.contains_key(*i))
+                    .cloned()
+                    .collect()
+            };
+            if !fresh.is_empty() {
+                let held_off = state.lock().unwrap().backoff_secs_left().is_some();
+                if !held_off {
+                    refresh_quotes(state, &fresh);
+                }
+            }
         }
         Cmd::WatchlistAdd(isin) => {
             let call = sc::run(&["broker", "watchlist", "add", "--isin", &isin]);
@@ -582,6 +601,11 @@ fn refresh_account(state: &Arc<Mutex<Shared>>) {
     match &hd.data {
         Ok(v) => {
             s.holdings = Holding::list_from(sc::result(v));
+            for h in &s.holdings.clone() {
+                if !h.isin.is_empty() && !h.name.is_empty() {
+                    s.names.insert(h.isin.clone(), h.name.clone());
+                }
+            }
             s.holdings_raw = v.clone();
             let n = s.holdings.len();
             s.push_log(
@@ -660,6 +684,9 @@ fn refresh_watchlist(state: &Arc<Mutex<Shared>>) {
                 if q.isin.is_empty() {
                     continue;
                 }
+                if !q.name.is_empty() {
+                    s.names.insert(q.isin.clone(), q.name.clone());
+                }
                 s.quotes.entry(q.isin.clone()).or_insert(q);
             }
             let n = s.watchlist.len();
@@ -734,6 +761,9 @@ fn refresh_quotes(state: &Arc<Mutex<Shared>>, isins: &[String]) {
         total_ms += ms;
         match q {
             Some(q) => {
+                if !q.name.is_empty() {
+                    s.names.insert(isin.clone(), q.name.clone());
+                }
                 s.quotes.insert(isin.clone(), q.clone());
             }
             None => {
@@ -1081,6 +1111,13 @@ fn do_search(state: &Arc<Mutex<Shared>>, q: &str) {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
+            for r in &s.search_results.clone() {
+                if let (Some(isin), Some(name)) =
+                    (sc::str_at(r, &["isin"]), sc::str_at(r, &["name"]))
+                {
+                    s.names.insert(isin, name);
+                }
+            }
             let n = s.search_results.len();
             s.push_log(
                 "broker.search",

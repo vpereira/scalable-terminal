@@ -124,6 +124,8 @@ Custom lists exist partly because Scalable will not watchlist an instrument you 
 
 Local state lives in `~/.config/scalable-terminal/workspace.json`, separate from broker state so a refresh can never discard it. Whichever list is showing, holdings are still priced, since position profit has to be marked against a live quote rather than a stale one.
 
+Switching lists prices whatever is newly on screen straight away rather than waiting for the next poll, and instrument names are remembered from every endpoint that reports one, so a row that has no quote yet still says what it is and shows a waiting marker instead of a line of dashes.
+
 Right column: cash and buying power, positions with cost basis and unrealised profit against a live mid, working orders with cancel, trailing stops, order ticket.
 
 Main area:
