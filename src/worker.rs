@@ -47,6 +47,8 @@ pub const TIMEFRAMES: [&str; 8] = ["1d", "7d", "1m", "3m", "6m", "ytd", "1y", "m
 pub enum Cmd {
     RefreshAll,
     RefreshQuotes,
+    /// Instruments worth polling, computed by the UI from the active list.
+    SetPollSet(Vec<String>),
     WatchlistAdd(String),
     WatchlistRemove(String),
     LoadChart {
@@ -155,6 +157,7 @@ pub struct Shared {
     pub session: Option<String>,
     pub session_error: Option<String>,
     pub watchlist: Vec<String>,
+    pub poll_set: Vec<String>,
     pub quotes: HashMap<String, Quote>,
     pub holdings: Vec<Holding>,
     pub orders: Vec<PendingOrder>,
@@ -316,7 +319,7 @@ fn worker_loop(
                 (s.backoff_secs_left().is_some(), s.probe_next)
             };
             if interval > Duration::ZERO && !held_off {
-                let list = poll_list(state.lock().unwrap().watchlist_plus_holdings(), probing);
+                let list = poll_list(state.lock().unwrap().poll_targets(), probing);
                 if !list.is_empty() {
                     refresh_quotes(&state, &list);
                     ctx.request_repaint();
@@ -333,9 +336,12 @@ fn worker_loop(
 }
 
 impl Shared {
-    /// Poll everything on screen: the watchlist plus anything held, since
-    /// positions need a live mid to mark P&L.
-    fn watchlist_plus_holdings(&self) -> Vec<String> {
+    /// What to poll. The UI sets this from the active list; until it has, fall
+    /// back to the broker watchlist plus holdings so startup is never blank.
+    fn poll_targets(&self) -> Vec<String> {
+        if !self.poll_set.is_empty() {
+            return self.poll_set.clone();
+        }
         let mut v = self.watchlist.clone();
         for h in &self.holdings {
             if !h.isin.is_empty() && !v.contains(&h.isin) {
@@ -351,12 +357,15 @@ fn handle(state: &Arc<Mutex<Shared>>, cmd: Cmd) {
         Cmd::RefreshAll => {
             refresh_account(state);
             refresh_watchlist(state);
-            let list = state.lock().unwrap().watchlist_plus_holdings();
+            let list = state.lock().unwrap().poll_targets();
             refresh_quotes(state, &list);
         }
         Cmd::RefreshQuotes => {
-            let list = state.lock().unwrap().watchlist_plus_holdings();
+            let list = state.lock().unwrap().poll_targets();
             refresh_quotes(state, &list);
+        }
+        Cmd::SetPollSet(set) => {
+            state.lock().unwrap().poll_set = set;
         }
         Cmd::WatchlistAdd(isin) => {
             let call = sc::run(&["broker", "watchlist", "add", "--isin", &isin]);

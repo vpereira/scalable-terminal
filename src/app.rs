@@ -1,6 +1,7 @@
 use crate::model::*;
 use crate::shortcuts::{self, Act};
 use crate::worker::{self, Cmd, Handle, TIMEFRAMES, TradeIntent};
+use crate::workspace::{ListId, Workspace};
 use egui::{Color32, RichText};
 use egui_extras::{Column, TableBuilder};
 use std::sync::{Arc, Mutex};
@@ -66,6 +67,9 @@ pub struct App {
     deriv_underlying: Option<String>,
     trail_distance: f64,
     trail_percent: bool,
+    workspace: Workspace,
+    new_list: String,
+    last_poll_set: Vec<String>,
     show_help: bool,
     /// Set when a shortcut asks for a text field; consumed on the next frame.
     focus_search: bool,
@@ -129,6 +133,9 @@ impl App {
             deriv_underlying: None,
             trail_distance: 3.0,
             trail_percent: true,
+            workspace: Workspace::load(),
+            new_list: String::new(),
+            last_poll_set: Vec::new(),
             show_help: help_on_start,
             focus_search: false,
             focus_add: false,
@@ -227,6 +234,43 @@ impl App {
         };
         if let Some(isin) = first {
             self.select(isin);
+        }
+    }
+
+    /// Membership goes wherever the active list actually lives: the broker for
+    /// its own list, this machine for a custom one. Positions is derived and
+    /// cannot be edited at all.
+    fn add_to_active(&mut self, isin: &str) {
+        match self.workspace.active {
+            ListId::Broker => {
+                let _ = self.io.tx.send(Cmd::WatchlistAdd(isin.to_string()));
+            }
+            ListId::Positions => {
+                self.io.state.lock().unwrap().watchlist_error = Some(
+                    "Positions is maintained automatically. Pick another list to add to.".into(),
+                );
+            }
+            id @ ListId::Local(_) => {
+                if let Some(l) = self.workspace.local_mut(id) {
+                    l.add(isin);
+                    self.workspace.save();
+                }
+            }
+        }
+    }
+
+    fn remove_from_active(&mut self, isin: &str) {
+        match self.workspace.active {
+            ListId::Broker => {
+                let _ = self.io.tx.send(Cmd::WatchlistRemove(isin.to_string()));
+            }
+            ListId::Positions => {}
+            id @ ListId::Local(_) => {
+                if let Some(l) = self.workspace.local_mut(id) {
+                    l.remove(isin);
+                    self.workspace.save();
+                }
+            }
         }
     }
 
@@ -703,13 +747,58 @@ impl App {
                 )
             };
 
-            ui.horizontal(|ui| {
-                ui.heading("Watchlist");
-                ui.label(
-                    RichText::new("synced with your Scalable account")
-                        .color(DIM)
-                        .small(),
+            let active = self.workspace.active;
+            ui.horizontal_wrapped(|ui| {
+                ui.heading("Lists");
+                ui.separator();
+                if ui
+                    .selectable_label(active == ListId::Broker, "Scalable account")
+                    .on_hover_text("the broker's own watchlist, shared with your phone")
+                    .clicked()
+                {
+                    self.workspace.active = ListId::Broker;
+                    self.workspace.save();
+                }
+                if ui
+                    .selectable_label(active == ListId::Positions, "Positions")
+                    .on_hover_text("whatever you currently hold, maintained automatically")
+                    .clicked()
+                {
+                    self.workspace.active = ListId::Positions;
+                    self.workspace.save();
+                }
+                for i in 0..self.workspace.lists.len() {
+                    let id = ListId::Local(i);
+                    let label = match self.workspace.local(id) {
+                        Some(l) => format!("{} ({})", l.name, l.isins.len()),
+                        None => continue,
+                    };
+                    if ui.selectable_label(active == id, label).clicked() {
+                        self.workspace.active = id;
+                        self.workspace.save();
+                    }
+                }
+                ui.separator();
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_list)
+                        .hint_text("new list")
+                        .desired_width(90.0),
                 );
+                if ui.small_button("+").clicked() && !self.new_list.trim().is_empty() {
+                    let id = self.workspace.create(self.new_list.trim());
+                    self.workspace.active = id;
+                    self.new_list.clear();
+                    self.workspace.save();
+                }
+                if let ListId::Local(i) = self.workspace.active
+                    && ui
+                        .small_button("delete list")
+                        .on_hover_text("removes the list, not the instruments")
+                        .clicked()
+                    {
+                        self.workspace.delete(i);
+                        self.workspace.save();
+                    }
             });
 
             ui.horizontal(|ui| {
@@ -723,7 +812,7 @@ impl App {
                 }
                 if ui.button("Add").clicked() && self.new_isin.trim().len() >= 6 {
                     let isin = self.new_isin.trim().to_uppercase();
-                    let _ = self.io.tx.send(Cmd::WatchlistAdd(isin.clone()));
+                    self.add_to_active(&isin);
                     self.select(isin);
                     self.new_isin.clear();
                 }
@@ -765,7 +854,7 @@ impl App {
                                         .clicked()
                                         && !isin.is_empty()
                                     {
-                                        let _ = self.io.tx.send(Cmd::WatchlistAdd(isin.clone()));
+                                        self.add_to_active(&isin);
                                     }
                                     if ui
                                         .selectable_label(
@@ -788,15 +877,29 @@ impl App {
                 }
             }
 
-            // Scalable refuses to watchlist anything you hold, so a position can
-            // never appear here on its own. Show holdings alongside the watched
-            // instruments, flagged, so one strip covers everything being tracked.
-            let mut ordered: Vec<(String, bool)> =
-                watchlist.iter().map(|i| (i.clone(), false)).collect();
-            for h in &holdings {
-                if !h.isin.is_empty() && !watchlist.contains(&h.isin) {
-                    ordered.push((h.isin.clone(), true));
-                }
+            let held: Vec<String> = holdings
+                .iter()
+                .filter(|h| !h.isin.is_empty())
+                .map(|h| h.isin.clone())
+                .collect();
+
+            // Rows follow the active list. Holdings are flagged wherever they
+            // appear, since the broker will not store them on its own list.
+            let ordered: Vec<(String, bool)> = self
+                .workspace
+                .rows(&watchlist, &held)
+                .into_iter()
+                .map(|i| {
+                    let is_held = held.contains(&i);
+                    (i, is_held)
+                })
+                .collect();
+
+            // Tell the worker what to price, only when it actually changed.
+            let poll = self.workspace.poll_set(&watchlist, &held);
+            if poll != self.last_poll_set {
+                self.last_poll_set = poll.clone();
+                let _ = self.io.tx.send(Cmd::SetPollSet(poll));
             }
             let rows: Vec<(Quote, bool)> = ordered
                 .iter()
@@ -813,8 +916,13 @@ impl App {
 
             let mut remove: Option<String> = None;
             let mut pick: Option<String> = None;
+            let mut reorder: Option<(String, isize)> = None;
 
-            let title = format!("Instruments ({})", rows.len());
+            let title = format!(
+                "{} ({})",
+                self.workspace.name_of(self.workspace.active),
+                rows.len()
+            );
             let (_, _) = section(ui, &title, None, |ui| {
             TableBuilder::new(ui)
                 .striped(true)
@@ -825,9 +933,12 @@ impl App {
                 .columns(Column::exact(74.0), 3)
                 .column(Column::exact(66.0))
                 .column(Column::exact(64.0))
+                .column(Column::exact(64.0))
                 .column(Column::exact(22.0))
                 .header(20.0, |mut h| {
-                    for t in ["", "ISIN", "Name", "Bid", "Ask", "Mid", "Chg %", "Spr bps", ""] {
+                    for t in [
+                        "", "ISIN", "Name", "Bid", "Ask", "Mid", "Chg %", "Spr bps", "", "",
+                    ] {
                         h.col(|ui| {
                             if !t.is_empty() {
                                 ui.label(RichText::new(t).strong());
@@ -904,9 +1015,28 @@ impl App {
                                 .on_hover_text(format!("absolute spread {}", num(q.spread_abs(), 4)));
                         });
                         row.col(|ui| {
-                            // A holding is not a watchlist entry, so there is
-                            // nothing here to remove.
-                            if !held && ui.small_button("x").clicked() {
+                            // Order is the ranking on a custom list, so it is
+                            // worth moving. The broker list has no order to keep.
+                            if matches!(self.workspace.active, ListId::Local(_)) {
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("\u{2b07}").clicked() {
+                                        reorder = Some((q.isin.clone(), 1));
+                                    }
+                                    if ui.small_button("\u{2b06}").clicked() {
+                                        reorder = Some((q.isin.clone(), -1));
+                                    }
+                                });
+                            }
+                        });
+                        row.col(|ui| {
+                            // Positions is derived, and a holding shown on the
+                            // broker list has no entry there to delete.
+                            let editable = match self.workspace.active {
+                                ListId::Positions => false,
+                                ListId::Broker => !held,
+                                ListId::Local(_) => true,
+                            };
+                            if editable && ui.small_button("x").clicked() {
                                 remove = Some(q.isin.clone());
                             }
                         });
@@ -918,7 +1048,14 @@ impl App {
                 self.select(p);
             }
             if let Some(r) = remove {
-                let _ = self.io.tx.send(Cmd::WatchlistRemove(r));
+                self.remove_from_active(&r);
+            }
+            if let Some((isin, delta)) = reorder {
+                let id = self.workspace.active;
+                if let Some(l) = self.workspace.local_mut(id) {
+                    l.move_by(&isin, delta);
+                    self.workspace.save();
+                }
             }
 
         });

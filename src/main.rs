@@ -5,6 +5,7 @@ mod model;
 mod sc;
 mod shortcuts;
 mod worker;
+mod workspace;
 
 #[cfg(test)]
 mod tests;

@@ -112,9 +112,17 @@ Seven direct dependencies: eframe, egui, egui_extras, egui_plot, serde, serde_js
 
 Top bar: session, last quote round time and instrument count, poll interval, refresh buttons, rate limit countdown, view tabs.
 
-Watchlist strip: your Scalable watchlist plus every position you hold, marked POS. Adding and removing changes the account, so the terminal and your phone agree. Columns are bid, ask, mid, intraday change and spread in basis points, colour coded. A marker flags quotes the broker considers stale.
+Watchlist strip, with a list selector across the top. Columns are bid, ask, mid, intraday change and spread in basis points, colour coded. A marker flags quotes the broker considers stale.
 
-Positions appear in the strip because Scalable will not watchlist an instrument you own. The API accepts the request, answers `ok`, then reports `is_on_watchlist: false` and nothing appears. Tested across six instruments: held refused, unheld accepted. They have no remove button, since there is no watchlist entry to remove.
+Three kinds of list:
+
+* **Scalable account** mirrors the broker watchlist. Adding and removing changes the account, so the terminal and your phone agree.
+* **Positions** is whatever you hold, maintained automatically. Nothing to edit.
+* **Custom lists** are local to this machine. Momentum, breakouts, income, whatever you want. Create them in the selector, order them with the arrows, and that order persists, because on a list like this the ranking is the point.
+
+Custom lists exist partly because Scalable will not watchlist an instrument you own. The API accepts the request, answers `ok`, then reports `is_on_watchlist: false` and nothing appears. Tested across six instruments: held refused, unheld accepted. A local list has no such restriction, so a position can sit in Momentum next to everything else, flagged POS.
+
+Local state lives in `~/.config/scalable-terminal/workspace.json`, separate from broker state so a refresh can never discard it. Whichever list is showing, holdings are still priced, since position profit has to be marked against a live quote rather than a stale one.
 
 Right column: cash and buying power, positions with cost basis and unrealised profit against a live mid, working orders with cancel, trailing stops, order ticket.
 

@@ -949,3 +949,142 @@ fn probe_round_polls_a_single_instrument() {
     assert_eq!(poll_list(one.clone(), true), one);
     assert_eq!(poll_list(one.clone(), false), one);
 }
+
+/// Local lists exist so a held instrument can be tracked anywhere: the broker
+/// refuses those, which is the whole reason this store is separate.
+#[test]
+fn local_lists_accept_anything_and_stay_deduplicated() {
+    use crate::workspace::WatchList;
+
+    let mut l = WatchList::new("Momentum");
+    assert!(l.add("de000a2e4t77"), "new entry");
+    assert_eq!(l.isins, vec!["DE000A2E4T77"], "normalised to upper case");
+
+    assert!(!l.add("DE000A2E4T77"), "already present");
+    assert!(!l.add("  de000a2e4t77  "), "same after trimming");
+    assert_eq!(l.isins.len(), 1);
+
+    assert!(!l.add("   "), "blank is not an instrument");
+    assert!(!l.add(""));
+    assert_eq!(l.isins.len(), 1);
+
+    // A held instrument is fine here, unlike on the broker list.
+    assert!(l.add("JP3228600007"));
+    l.remove("DE000A2E4T77");
+    assert_eq!(l.isins, vec!["JP3228600007"]);
+    l.remove("NOT_THERE");
+    assert_eq!(l.isins.len(), 1);
+}
+
+/// Order is the user's ranking, so it has to be data rather than incidental.
+#[test]
+fn reordering_is_clamped_and_order_preserving() {
+    use crate::workspace::WatchList;
+
+    let mut l = WatchList::new("L");
+    for i in ["A", "B", "C", "D"] {
+        l.add(i);
+    }
+
+    l.move_by("C", -1);
+    assert_eq!(l.isins, vec!["A", "C", "B", "D"]);
+
+    // Past either end clamps rather than wrapping or panicking.
+    l.move_by("A", -5);
+    assert_eq!(l.isins, vec!["A", "C", "B", "D"]);
+    l.move_by("D", 9);
+    assert_eq!(l.isins, vec!["A", "C", "B", "D"]);
+
+    l.move_by("A", 3);
+    assert_eq!(l.isins, vec!["C", "B", "D", "A"]);
+
+    l.move_by("MISSING", 1);
+    assert_eq!(l.isins.len(), 4, "unknown entry changes nothing");
+}
+
+/// Deleting a list shifts every index after it. Leaving the active selection
+/// alone would silently switch the user to a different list.
+#[test]
+fn deleting_a_list_rewrites_the_active_selection() {
+    use crate::workspace::{ListId, Workspace};
+
+    let mut w = Workspace::default();
+    assert_eq!(w.active, ListId::Broker);
+    w.create("Momentum");
+    w.create("CAN SLIM");
+    w.create("Income");
+
+    // Deleting a list before the active one shifts it down.
+    w.active = ListId::Local(2);
+    w.delete(0);
+    assert_eq!(w.active, ListId::Local(1));
+    assert_eq!(w.name_of(w.active), "Income");
+
+    // Deleting the active list falls back rather than dangling.
+    w.delete(1);
+    assert_eq!(w.active, ListId::Broker);
+
+    // Out of range deletes are ignored.
+    let before = w.lists.len();
+    w.delete(99);
+    assert_eq!(w.lists.len(), before);
+}
+
+/// A stored file can name a list that no longer exists. Without repair the
+/// strip would come up empty with no way back.
+#[test]
+fn a_stale_active_list_falls_back_to_the_broker() {
+    use crate::workspace::{ListId, Workspace};
+
+    let mut w = Workspace {
+        active: ListId::Local(7),
+        ..Default::default()
+    };
+    w.repair();
+    assert_eq!(w.active, ListId::Broker);
+
+    w.create("Only");
+    w.active = ListId::Local(0);
+    w.repair();
+    assert_eq!(w.active, ListId::Local(0), "a valid selection survives");
+}
+
+/// Holdings must always be priced, whichever list is on screen, or position
+/// profit is marked against a stale quote.
+#[test]
+fn rows_and_poll_set_cover_the_right_instruments() {
+    use crate::workspace::{ListId, Workspace};
+
+    let broker = vec!["AAA".to_string(), "BBB".to_string()];
+    let held = vec!["HELD1".to_string(), "HELD2".to_string()];
+
+    let mut w = Workspace::default();
+
+    // The broker list shows holdings too, since they cannot be stored on it.
+    let rows = w.rows(&broker, &held);
+    assert_eq!(rows, vec!["AAA", "BBB", "HELD1", "HELD2"]);
+
+    w.active = ListId::Positions;
+    assert_eq!(w.rows(&broker, &held), held);
+
+    let id = w.create("Momentum");
+    w.local_mut(id).unwrap().add("AAA");
+    w.active = id;
+    assert_eq!(
+        w.rows(&broker, &held),
+        vec!["AAA"],
+        "only what the list holds"
+    );
+
+    // But polling still covers holdings, and never duplicates.
+    let poll = w.poll_set(&broker, &held);
+    assert_eq!(poll, vec!["AAA", "HELD1", "HELD2"]);
+
+    w.local_mut(id).unwrap().add("HELD1");
+    let poll = w.poll_set(&broker, &held);
+    assert_eq!(
+        poll.iter().filter(|i| *i == "HELD1").count(),
+        1,
+        "deduplicated"
+    );
+}
