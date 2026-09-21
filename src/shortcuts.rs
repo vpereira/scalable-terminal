@@ -236,6 +236,13 @@ pub fn pressed(ctx: &egui::Context) -> Option<Act> {
     if ctx.egui_wants_keyboard_input() {
         return None;
     }
+    // A focused widget already consumes Space and Enter to activate itself. If a
+    // shortcut also fired on the same keypress, one key would both toggle a
+    // setting and press whatever button happened to hold focus, which is how an
+    // order side could flip without anyone touching it.
+    if ctx.memory(|m| m.focused()).is_some() {
+        return None;
+    }
     ctx.input(|i| {
         BINDINGS
             .iter()
