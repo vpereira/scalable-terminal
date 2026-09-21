@@ -61,6 +61,9 @@ pub enum Cmd {
         dtype: String,
         strategy: String,
     },
+    LoadNews {
+        isin: String,
+    },
     ArmTrail {
         isin: String,
         distance: f64,
@@ -185,6 +188,10 @@ pub struct Shared {
     pub derivatives_error: Option<String>,
     pub derivatives_loading: bool,
     pub derivatives_cache: HashMap<(String, String, String), DerivativesPage>,
+    pub news: SecurityNews,
+    pub news_error: Option<String>,
+    pub news_loading: bool,
+    pub news_cache: HashMap<String, SecurityNews>,
     pub trails: Vec<Trail>,
     /// Set while a ratchet has cancelled the old stop but not yet placed the new
     /// one. The position is unprotected for this whole window.
@@ -439,6 +446,7 @@ fn handle(state: &Arc<Mutex<Shared>>, cmd: Cmd) {
             dtype,
             strategy,
         } => load_derivatives(state, &underlying, &dtype, &strategy),
+        Cmd::LoadNews { isin } => load_news(state, &isin),
         Cmd::ArmTrail {
             isin,
             distance,
@@ -1104,6 +1112,61 @@ fn ratchet_trail(state: &Arc<Mutex<Shared>>, isin: &str) {
         s.trail_error = Some(format!(
             "the stop was cancelled but the replacement preview failed. {isin} is UNPROTECTED.              Place a stop manually or retry."
         ));
+    }
+}
+
+/// News is cached per instrument and fetched on demand. An instrument with no
+/// coverage is a normal answer, not a failure, so an empty result is cached too
+/// rather than refetched every time the tab is opened.
+fn load_news(state: &Arc<Mutex<Shared>>, isin: &str) {
+    {
+        let mut s = state.lock().unwrap();
+        if let Some(n) = s.news_cache.get(isin) {
+            s.news = n.clone();
+            s.news_error = None;
+            return;
+        }
+        if let Some(left) = s.backoff_secs_left() {
+            s.news_error = Some(format!("rate limited, retrying in {left}s"));
+            return;
+        }
+        s.news_loading = true;
+        s.news_error = None;
+    }
+
+    let call = sc::run(&["broker", "security-news", "--isin", isin]);
+    let mut s = state.lock().unwrap();
+    s.news_loading = false;
+    match &call.data {
+        Ok(v) => {
+            let mut news = SecurityNews::from_json(sc::result(v));
+            if news.isin.is_empty() {
+                news.isin = isin.to_string();
+            }
+            let n = news.sources.len();
+            s.news_cache.insert(isin.to_string(), news.clone());
+            s.news = news;
+            s.push_log(
+                "security-news",
+                call.elapsed.as_millis(),
+                true,
+                format!("{isin}: {n} headlines"),
+            );
+        }
+        Err(e) => {
+            if e.kind == sc::ScErrorKind::RateLimited {
+                s.note_rate_limit("security-news");
+                s.news_error = Some("rate limited, try again shortly".into());
+            } else {
+                s.news_error = Some(e.to_string());
+            }
+            s.push_log(
+                "security-news",
+                call.elapsed.as_millis(),
+                false,
+                e.to_string(),
+            );
+        }
     }
 }
 

@@ -1344,3 +1344,54 @@ fn prefs_round_trip_through_json() {
     let back: Workspace = serde_json::from_str(old).unwrap();
     assert_eq!(back.prefs, Prefs::default());
 }
+
+const NEWS: &str = include_str!("../tests/fixtures/security-news.json");
+
+/// Like `broker.chart`, this payload sits directly under `data` rather than
+/// `data.result`. Unwrapping the wrong level yields an empty panel.
+#[test]
+fn security_news_extracts_summary_and_headlines() {
+    let data = envelope(NEWS);
+    assert!(
+        data.get("result").is_none(),
+        "no result wrapper on this endpoint"
+    );
+
+    let n = SecurityNews::from_json(sc::result(&data));
+    assert_eq!(n.isin, "US0231351067");
+    assert_eq!(n.locale, "en_DE");
+    assert!(!n.is_empty());
+
+    assert!(n.short.contains("Generac"));
+    assert!(n.long.contains("Project Mercury"));
+    assert!(!n.last_updated.is_empty());
+
+    assert_eq!(n.sources.len(), 3);
+    for item in &n.sources {
+        assert!(
+            !item.headline.is_empty(),
+            "a headline with no text is not worth a row"
+        );
+        assert_eq!(item.source, "dpa-AFX");
+        // The date prefix is sliced for display, so it must be long enough.
+        assert!(item.published.len() >= 10, "{:?}", item.published);
+    }
+}
+
+/// Coverage is uneven: smaller instruments return nothing. That is a normal
+/// answer and must be distinguishable from a failed call.
+#[test]
+fn news_with_no_coverage_is_empty_not_an_error() {
+    let raw = r#"{"ok":true,"command":"broker.security-news","data":{"isin":"CA53056H1047","locale":"en_DE","sources":[],"summary":null}}"#;
+    let v: Value = serde_json::from_str(raw).unwrap();
+    assert_eq!(v["ok"], Value::Bool(true), "the call succeeded");
+
+    let n = SecurityNews::from_json(sc::result(&v["data"]));
+    assert_eq!(n.isin, "CA53056H1047");
+    assert!(n.is_empty(), "no summary and no headlines");
+    assert!(n.short.is_empty() && n.long.is_empty());
+    assert!(n.sources.is_empty());
+
+    // A fully absent payload must not panic either.
+    assert!(SecurityNews::from_json(&serde_json::json!({})).is_empty());
+}

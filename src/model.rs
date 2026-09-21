@@ -988,3 +988,54 @@ impl PriceAlert {
         (mid > 0.0).then(|| (p - mid) / mid)
     }
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct NewsItem {
+    pub headline: String,
+    pub source: String,
+    pub published: String,
+}
+
+/// News and an editorial summary for one instrument.
+///
+/// Note the payload sits directly under `data`, not `data.result`, the same as
+/// `broker.chart`. Coverage is uneven: large caps carry a summary, small ones
+/// often return nothing at all, so absence is normal rather than an error.
+#[derive(Debug, Clone, Default)]
+pub struct SecurityNews {
+    pub isin: String,
+    pub locale: String,
+    pub short: String,
+    pub long: String,
+    pub last_updated: String,
+    pub sources: Vec<NewsItem>,
+}
+
+impl SecurityNews {
+    pub fn from_json(v: &Value) -> SecurityNews {
+        SecurityNews {
+            isin: str_at(v, &["isin"]).unwrap_or_default(),
+            locale: str_at(v, &["locale"]).unwrap_or_default(),
+            short: str_at(v, &["summary/short"]).unwrap_or_default(),
+            long: str_at(v, &["summary/long"]).unwrap_or_default(),
+            last_updated: str_at(v, &["summary/last_updated"]).unwrap_or_default(),
+            sources: pick(v, &["sources"])
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .map(|i| NewsItem {
+                            headline: str_at(i, &["headline"]).unwrap_or_default(),
+                            source: str_at(i, &["source_name"]).unwrap_or_default(),
+                            published: str_at(i, &["publication_time_utc"]).unwrap_or_default(),
+                        })
+                        .filter(|i| !i.headline.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.short.is_empty() && self.long.is_empty() && self.sources.is_empty()
+    }
+}

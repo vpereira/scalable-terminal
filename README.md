@@ -178,6 +178,18 @@ Submitting an order has no shortcut and will not get one. The same goes for movi
 
 Shortcuts are suppressed while a text field has focus. Escape leaves the field.
 
+## News
+
+`broker security-news` returns headlines plus a written summary of what is actually moving a price, which is the closest thing the CLI has to the app's insights view. The News tab shows it for whatever instrument is selected:
+
+* What is moving it, the one line summary.
+* Detail, the longer explanation, a few paragraphs.
+* Headlines, with source and date.
+
+Coverage is uneven. Large names carry a summary, smaller ones frequently return nothing at all. That is a normal answer rather than a failure, so the panel says there is no coverage instead of showing an empty box. Results are cached per instrument, including the empty ones, so reopening the tab costs nothing.
+
+Note this payload sits directly under `data` rather than `data.result`, the same quirk as `broker chart`.
+
 ## Orders
 
 Market, limit and stop. Venue overridable. No bracket or OCO, because the CLI has neither.

@@ -26,6 +26,7 @@ enum Tab {
     Portfolio,
     Chart,
     Derivatives,
+    News,
     Log,
     Raw,
 }
@@ -115,6 +116,7 @@ impl App {
             .map(|t| match t {
                 "chart" => Tab::Chart,
                 "derivatives" => Tab::Derivatives,
+                "news" => Tab::News,
                 "log" => Tab::Log,
                 "raw" => Tab::Raw,
                 _ => Tab::Portfolio,
@@ -777,6 +779,7 @@ impl App {
                     ui.selectable_value(&mut self.tab, Tab::Log, "Log");
                     ui.selectable_value(&mut self.tab, Tab::Portfolio, "Portfolio");
                     ui.selectable_value(&mut self.tab, Tab::Derivatives, "Derivatives");
+                    ui.selectable_value(&mut self.tab, Tab::News, "News");
                     ui.selectable_value(&mut self.tab, Tab::Chart, "Chart");
                 });
             });
@@ -1979,6 +1982,7 @@ impl App {
             Tab::Portfolio => self.portfolio_view(ui),
             Tab::Chart => self.chart_view(ui),
             Tab::Derivatives => self.derivatives_view(ui),
+            Tab::News => self.news_view(ui),
             Tab::Log => self.log_view(ui),
             Tab::Raw => self.raw_view(ui),
         });
@@ -2431,6 +2435,116 @@ impl App {
         if let Some(isin) = watch {
             let _ = self.io.tx.send(Cmd::WatchlistAdd(isin));
         }
+    }
+
+    /// News and the broker's written summary for the selected instrument.
+    ///
+    /// Coverage is uneven. Large caps carry a summary, small ones often carry
+    /// nothing, so "no coverage" is stated plainly rather than left as a blank
+    /// panel that looks broken.
+    fn news_view(&mut self, ui: &mut egui::Ui) {
+        let Some(isin) = self.selected.clone() else {
+            ui.label(RichText::new("select an instrument").color(DIM));
+            return;
+        };
+
+        let (news, err, loading) = {
+            let s = self.io.state.lock().unwrap();
+            (s.news.clone(), s.news_error.clone(), s.news_loading)
+        };
+
+        // Follow the selection without refetching what is already cached.
+        if news.isin != isin && !loading {
+            let _ = self.io.tx.send(Cmd::LoadNews { isin: isin.clone() });
+        }
+
+        let name = {
+            let s = self.io.state.lock().unwrap();
+            s.names.get(&isin).cloned().unwrap_or_default()
+        };
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&isin).monospace().strong());
+            if !name.is_empty() {
+                ui.label(RichText::new(&name).color(DIM));
+            }
+            if loading {
+                ui.spinner();
+            }
+            if ui.small_button("reload").clicked() {
+                self.io.state.lock().unwrap().news_cache.remove(&isin);
+                let _ = self.io.tx.send(Cmd::LoadNews { isin: isin.clone() });
+            }
+            if !news.last_updated.is_empty() {
+                ui.label(
+                    RichText::new(format!("updated {}", news.last_updated))
+                        .color(DIM)
+                        .small(),
+                )
+                .on_hover_text(format!("locale {}", news.locale));
+            }
+        });
+        if let Some(e) = &err {
+            ui.label(RichText::new(e).color(AMBER));
+        }
+        ui.separator();
+
+        if news.isin != isin {
+            if !loading {
+                ui.label(RichText::new("loading…").color(DIM));
+            }
+            return;
+        }
+        if news.is_empty() {
+            ui.label(RichText::new("no news coverage for this instrument").color(DIM));
+            ui.label(
+                RichText::new(
+                    "Scalable carries summaries for larger names; smaller ones often have none.",
+                )
+                .color(DIM)
+                .small(),
+            );
+            return;
+        }
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            if !news.short.is_empty() {
+                section(ui, "What is moving it", None, |ui| {
+                    ui.label(RichText::new(&news.short).size(15.0));
+                });
+            }
+            if !news.long.is_empty() {
+                section(ui, "Detail", None, |ui| {
+                    // The text arrives with markdown bold markers; egui renders
+                    // no markdown, so strip them rather than show the asterisks.
+                    for para in news.long.split("\n\n") {
+                        let clean = para.replace("**", "");
+                        if !clean.trim().is_empty() {
+                            ui.label(clean.trim());
+                            ui.add_space(6.0);
+                        }
+                    }
+                });
+            }
+            if !news.sources.is_empty() {
+                let title = format!("Headlines ({})", news.sources.len());
+                section(ui, &title, None, |ui| {
+                    for item in &news.sources {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(&item.published[..item.published.len().min(10)])
+                                    .color(DIM)
+                                    .monospace()
+                                    .small(),
+                            );
+                            ui.label(RichText::new(&item.source).color(BLUE).small());
+                            ui.label(&item.headline);
+                        });
+                        ui.add_space(4.0);
+                    }
+                });
+            }
+        });
     }
 
     fn chart_view(&mut self, ui: &mut egui::Ui) {
