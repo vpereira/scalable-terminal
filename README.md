@@ -232,8 +232,14 @@ This exists because the app cannot be brought to the foreground from a script on
 
 ## Status
 
-Verified against a live account: every read shape, quote polling and its timings, candle aggregation and moving averages, both phases of the order flow, and cancelling. A limit buy has been placed through the ticket and rested correctly at the broker, and a resting order has been cancelled from the working orders panel.
+Verified against a live account: every read shape, quote polling and its timings, candle aggregation and moving averages, both phases of the order flow, and cancelling. Limit buys placed through the ticket have both rested correctly and filled, and a resting order has been cancelled from the working orders panel.
 
 Error handling has been exercised in production rather than only in tests: backend rate limits and the recovery after them, the Secure Enclave refusing to sign while the Mac is locked, and the broker declining a watchlist add inside an `ok` response.
 
-Not yet exercised: stop and market orders, the trailing stop ratchet, and accounts unlike the one it was built against, which has four positions in a single currency, no crypto and no savings plans.
+Not yet exercised: stop and market orders, selling, the trailing stop ratchet, and accounts unlike the one it was built against, which has five positions in a single currency, no crypto and no savings plans.
+
+## Notice
+
+Not affiliated with or endorsed by Scalable Capital. It drives their official `sc` command line tool the same way a person would.
+
+Provided as is, without warranty. It places real orders against a real account.
