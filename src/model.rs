@@ -39,6 +39,62 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// Trailing performance by window, in percent.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Performance {
+    pub day: Option<f64>,
+    pub week: Option<f64>,
+    pub month: Option<f64>,
+    pub quarter: Option<f64>,
+    pub half: Option<f64>,
+    pub year: Option<f64>,
+}
+
+impl Performance {
+    pub fn get(&self, w: Window) -> Option<f64> {
+        match w {
+            Window::Day => self.day,
+            Window::Week => self.week,
+            Window::Month => self.month,
+            Window::Quarter => self.quarter,
+            Window::Half => self.half,
+            Window::Year => self.year,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Window {
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Half,
+    Year,
+}
+
+impl Window {
+    pub const ALL: [Window; 6] = [
+        Window::Day,
+        Window::Week,
+        Window::Month,
+        Window::Quarter,
+        Window::Half,
+        Window::Year,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Window::Day => "1D",
+            Window::Week => "1W",
+            Window::Month => "1M",
+            Window::Quarter => "3M",
+            Window::Half => "6M",
+            Window::Year => "1Y",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Quote {
     pub isin: String,
@@ -48,8 +104,10 @@ pub struct Quote {
     pub ask: Option<f64>,
     pub mid: Option<f64>,
     pub prev_close: Option<f64>,
-    pub change_pct: Option<f64>,
     pub change_abs: Option<f64>,
+    /// Performance by window, in percent. Every quote carries these; relative
+    /// strength across a group is the whole reason to keep them.
+    pub perf: Performance,
     pub currency: String,
     pub outdated: bool,
     pub timestamp: String,
@@ -60,13 +118,22 @@ impl Quote {
     pub fn from_json(isin: &str, v: &Value) -> Self {
         let mid = f64_at(v, &["quote_mid_price"]);
         // Intraday performance is the only place a reference close is exposed.
-        let mut change_pct = None;
         let mut change_abs = None;
+        let mut perf = Performance::default();
         if let Some(arr) = pick(v, &["quote_performances"]).and_then(Value::as_array) {
             for p in arr {
-                if str_at(p, &["timeframe"]).as_deref() == Some("INTRADAY") {
-                    change_pct = f64_at(p, &["performance"]).map(|x| x * 100.0);
-                    change_abs = f64_at(p, &["simple_absolute_return"]);
+                let pct = f64_at(p, &["performance"]).map(|x| x * 100.0);
+                match str_at(p, &["timeframe"]).as_deref() {
+                    Some("INTRADAY") => {
+                        change_abs = f64_at(p, &["simple_absolute_return"]);
+                        perf.day = pct;
+                    }
+                    Some("ONE_WEEK") => perf.week = pct,
+                    Some("ONE_MONTH") => perf.month = pct,
+                    Some("THREE_MONTHS") => perf.quarter = pct,
+                    Some("SIX_MONTHS") => perf.half = pct,
+                    Some("ONE_YEAR") => perf.year = pct,
+                    _ => {}
                 }
             }
         }
@@ -81,8 +148,8 @@ impl Quote {
                 (Some(m), Some(c)) => Some(m - c),
                 _ => None,
             },
-            change_pct,
             change_abs,
+            perf,
             currency: str_at(v, &["quote_currency"]).unwrap_or_default(),
             outdated: bool_at(v, "quote_is_outdated"),
             timestamp: str_at(v, &["quote_timestamp_utc"]).unwrap_or_default(),

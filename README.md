@@ -124,6 +124,18 @@ Custom lists exist partly because Scalable will not watchlist an instrument you 
 
 Local state lives in `~/.config/scalable-terminal/workspace.json`, separate from broker state so a refresh can never discard it. Whichever list is showing, holdings are still priced, since position profit has to be marked against a live quote rather than a stale one.
 
+## Relative strength
+
+Every quote carries its trailing performance, so the strip shows 1D, 1W, 1M, 3M, 6M and 1Y as columns. Click a header to rank by that window, click it again to flip the direction. Instruments with no reading sort to the bottom rather than counting as zero, which would drop an unpriced row into the middle of the pack.
+
+Scalable exposes no sector or industry for an instrument. Nothing in `sc broker search` or `broker quote` carries one, and portfolio analytics only classifies what you already hold. So grouping comes from tags you apply yourself: type a tag, add it to the selected instrument, then click any tag to filter the list to it. Tags are normalised to lower case, so AI, ai and Ai are one group rather than three that never rank against each other.
+
+That combination is the point. Tag a theme, filter to it, rank by 1M, and the leaders are the top rows.
+
+Tags live in `workspace.json` alongside the lists.
+
+## Screen notes
+
 Switching lists prices whatever is newly on screen straight away rather than waiting for the next poll, and instrument names are remembered from every endpoint that reports one, so a row that has no quote yet still says what it is and shows a waiting marker instead of a line of dashes.
 
 Right column: cash and buying power, positions with cost basis and unrealised profit against a live mid, working orders with cancel, trailing stops, order ticket.

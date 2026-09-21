@@ -1,3 +1,4 @@
+use crate::model::Window;
 use crate::model::*;
 use crate::shortcuts::{self, Act};
 use crate::worker::{self, Cmd, Handle, TIMEFRAMES, TradeIntent};
@@ -69,6 +70,11 @@ pub struct App {
     trail_percent: bool,
     workspace: Workspace,
     new_list: String,
+    /// Column the strip is ranked by. Leaders first is the default reading.
+    sort_by: Option<Window>,
+    sort_desc: bool,
+    tag_filter: Option<String>,
+    tag_input: String,
     last_poll_set: Vec<String>,
     show_help: bool,
     /// Set when a shortcut asks for a text field; consumed on the next frame.
@@ -135,6 +141,10 @@ impl App {
             trail_percent: true,
             workspace: Workspace::load(),
             new_list: String::new(),
+            sort_by: Some(Window::Week),
+            sort_desc: true,
+            tag_filter: None,
+            tag_input: String::new(),
             last_poll_set: Vec::new(),
             show_help: help_on_start,
             focus_search: false,
@@ -829,6 +839,58 @@ impl App {
                     let _ = self.io.tx.send(Cmd::Search(self.search_query.trim().to_string()));
                 }
             });
+            // Tagging is per instrument, so it acts on the selection.
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Tag").color(DIM));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.tag_input)
+                        .hint_text("ai, uranium, semis")
+                        .desired_width(120.0),
+                );
+                let sel = self.selected.clone();
+                let can = sel.is_some() && !self.tag_input.trim().is_empty();
+                if ui
+                    .add_enabled(can, egui::Button::new("add to selected"))
+                    .clicked()
+                    && let Some(isin) = sel.clone() {
+                        self.workspace.add_tag(&isin, &self.tag_input);
+                        self.tag_input.clear();
+                        self.workspace.save();
+                    }
+                if let Some(isin) = sel {
+                    let tags = self.workspace.tags_of(&isin).to_vec();
+                    if !tags.is_empty() {
+                        ui.separator();
+                        ui.label(RichText::new("on selection").color(DIM).small());
+                        for t in tags {
+                            if ui
+                                .small_button(RichText::new(format!("{t} \u{00d7}")).color(BLUE))
+                                .on_hover_text("remove this tag")
+                                .clicked()
+                            {
+                                self.workspace.remove_tag(&isin, &t);
+                                self.workspace.save();
+                            }
+                        }
+                    }
+                }
+
+                let all = self.workspace.all_tags();
+                if !all.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new("filter").color(DIM));
+                    for t in all {
+                        let on = self.tag_filter.as_deref() == Some(t.as_str());
+                        if ui.selectable_label(on, &t).clicked() {
+                            self.tag_filter = if on { None } else { Some(t.clone()) };
+                        }
+                    }
+                    if self.tag_filter.is_some() && ui.small_button("clear").clicked() {
+                        self.tag_filter = None;
+                    }
+                }
+            });
+
             if let Some(e) = &wl_error {
                 ui.label(RichText::new(e).color(AMBER));
             }
@@ -902,8 +964,12 @@ impl App {
                 self.last_poll_set = poll.clone();
                 let _ = self.io.tx.send(Cmd::SetPollSet(poll));
             }
-            let rows: Vec<(Quote, bool)> = ordered
+            let mut rows: Vec<(Quote, bool)> = ordered
                 .iter()
+                .filter(|(i, _)| match &self.tag_filter {
+                    Some(t) => self.workspace.has_tag(i, t),
+                    None => true,
+                })
                 .map(|(i, held)| {
                     let q = quotes.get(i).cloned().unwrap_or_else(|| Quote {
                         isin: i.clone(),
@@ -916,9 +982,29 @@ impl App {
                 })
                 .collect();
 
+            // Ranked by the chosen window. Instruments with no reading sort to
+            // the bottom rather than counting as zero, which would put an
+            // unpriced row in the middle of the pack.
+            if let Some(w) = self.sort_by {
+                let desc = self.sort_desc;
+                rows.sort_by(|a, b| {
+                    let (x, y) = (a.0.perf.get(w), b.0.perf.get(w));
+                    match (x, y) {
+                        (Some(x), Some(y)) => {
+                            let o = x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal);
+                            if desc { o.reverse() } else { o }
+                        }
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                });
+            }
+
             let mut remove: Option<String> = None;
             let mut pick: Option<String> = None;
             let mut reorder: Option<(String, isize)> = None;
+            let mut tag_click: Option<String> = None;
 
             let title = format!(
                 "{} ({})",
@@ -933,20 +1019,48 @@ impl App {
                 .column(Column::exact(118.0))
                 .column(Column::remainder().at_least(120.0))
                 .columns(Column::exact(74.0), 3)
-                .column(Column::exact(66.0))
-                .column(Column::exact(64.0))
+                .columns(Column::exact(62.0), 6)
+                .column(Column::exact(60.0))
+                .column(Column::remainder().at_least(80.0))
                 .column(Column::exact(64.0))
                 .column(Column::exact(22.0))
                 .header(20.0, |mut h| {
-                    for t in [
-                        "", "ISIN", "Name", "Bid", "Ask", "Mid", "Chg %", "Spr bps", "", "",
-                    ] {
+                    h.col(|_| {});
+                    for t in ["ISIN", "Name", "Bid", "Ask", "Mid"] {
                         h.col(|ui| {
-                            if !t.is_empty() {
-                                ui.label(RichText::new(t).strong());
+                            ui.label(RichText::new(t).strong());
+                        });
+                    }
+                    // Performance headers double as the ranking control.
+                    for w in Window::ALL {
+                        h.col(|ui| {
+                            let active = self.sort_by == Some(w);
+                            let mark = if !active {
+                                String::new()
+                            } else if self.sort_desc {
+                                " \u{2b07}".into()
+                            } else {
+                                " \u{2b06}".into()
+                            };
+                            let label = RichText::new(format!("{}{mark}", w.label())).strong();
+                            let label = if active { label.color(BLUE) } else { label };
+                            if ui.selectable_label(active, label).clicked() {
+                                if active {
+                                    self.sort_desc = !self.sort_desc;
+                                } else {
+                                    self.sort_by = Some(w);
+                                    self.sort_desc = true;
+                                }
                             }
                         });
                     }
+                    for t in ["Spr bps", "Tags"] {
+                        h.col(|ui| {
+                            ui.label(RichText::new(t).strong());
+                        });
+                    }
+                    h.col(|_| {});
+                    h.col(|_| {});
                 })
                 .body(|body| {
                     body.rows(20.0, rows.len(), |mut row| {
@@ -1005,7 +1119,12 @@ impl App {
                                 if q.timestamp.is_empty() { "unknown" } else { &q.timestamp }
                             ));
                         });
-                        row.col(|ui| signed(ui, q.change_pct, 2, "%"));
+                        // One cell per window, so leaders read across the row.
+                        for w in Window::ALL {
+                            row.col(|ui| {
+                                ui.label(signed_text(q.perf.get(w), 1, "%"));
+                            });
+                        }
                         row.col(|ui| {
                             // Spread in bps: the execution cost the broker UI never states.
                             let c = match q.spread_bps() {
@@ -1016,6 +1135,20 @@ impl App {
                             };
                             ui.label(RichText::new(num(q.spread_bps(), 1)).color(c).monospace())
                                 .on_hover_text(format!("absolute spread {}", num(q.spread_abs(), 4)));
+                        });
+                        row.col(|ui| {
+                            let tags = self.workspace.tags_of(&q.isin).to_vec();
+                            ui.horizontal(|ui| {
+                                for t in &tags {
+                                    if ui
+                                        .small_button(RichText::new(t).color(BLUE).small())
+                                        .on_hover_text("click to filter by this tag")
+                                        .clicked()
+                                    {
+                                        tag_click = Some(t.clone());
+                                    }
+                                }
+                            });
                         });
                         row.col(|ui| {
                             // Order is the ranking on a custom list, so it is
@@ -1052,6 +1185,14 @@ impl App {
             }
             if let Some(r) = remove {
                 self.remove_from_active(&r);
+            }
+            if let Some(t) = tag_click {
+                // Clicking a tag filters to it; clicking the active one clears.
+                self.tag_filter = if self.tag_filter.as_deref() == Some(t.as_str()) {
+                    None
+                } else {
+                    Some(t)
+                };
             }
             if let Some((isin, delta)) = reorder {
                 let id = self.workspace.active;

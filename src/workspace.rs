@@ -6,6 +6,7 @@
 //! local work, and local edits can never be mistaken for account state.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Which list the strip is showing.
@@ -66,6 +67,10 @@ impl WatchList {
 pub struct Workspace {
     pub lists: Vec<WatchList>,
     pub active: ListId,
+    /// Tags per ISIN. Scalable exposes no sector or industry for an instrument,
+    /// so grouping has to come from here. Sorted and deduplicated on write.
+    #[serde(default)]
+    pub tags: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Workspace {
@@ -74,6 +79,7 @@ impl Default for Workspace {
         Workspace {
             lists: Vec::new(),
             active: ListId::Broker,
+            tags: BTreeMap::new(),
         }
     }
 }
@@ -113,6 +119,47 @@ impl Workspace {
         {
             self.active = ListId::Broker;
         }
+    }
+
+    pub fn tags_of(&self, isin: &str) -> &[String] {
+        self.tags.get(isin).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Tags are free text but normalised, so "AI", "ai" and " Ai " are one tag
+    /// rather than three that never group together.
+    pub fn add_tag(&mut self, isin: &str, tag: &str) -> bool {
+        let tag = tag.trim().to_lowercase();
+        if tag.is_empty() || isin.is_empty() {
+            return false;
+        }
+        let entry = self.tags.entry(isin.to_string()).or_default();
+        if entry.iter().any(|t| t == &tag) {
+            return false;
+        }
+        entry.push(tag);
+        entry.sort();
+        true
+    }
+
+    pub fn remove_tag(&mut self, isin: &str, tag: &str) {
+        if let Some(v) = self.tags.get_mut(isin) {
+            v.retain(|t| t != tag);
+            if v.is_empty() {
+                self.tags.remove(isin);
+            }
+        }
+    }
+
+    /// Every tag in use, for the filter row.
+    pub fn all_tags(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.tags.values().flatten().cloned().collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    pub fn has_tag(&self, isin: &str, tag: &str) -> bool {
+        self.tags_of(isin).iter().any(|t| t == tag)
     }
 
     pub fn create(&mut self, name: impl Into<String>) -> ListId {

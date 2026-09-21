@@ -67,7 +67,6 @@ fn quote_extracts_two_sided_market() {
     assert!(close(q.mid.unwrap(), 1.317));
     // Intraday performance is the only reference-close the endpoint exposes.
     assert!(close(q.change_abs.unwrap(), 0.057));
-    assert!(close(q.change_pct.unwrap(), 4.52));
     assert!(close(q.prev_close.unwrap(), 1.26));
     assert!((q.spread_bps().unwrap() - 318.9066).abs() < 1e-3);
     assert!(close(q.spread_abs().unwrap(), 0.042));
@@ -1124,4 +1123,69 @@ fn names_are_learned_from_every_endpoint() {
 
     // Every name learned is non empty, or the fallback is pointless.
     assert!(names.values().all(|n| !n.is_empty()));
+}
+
+/// Scalable exposes no sector for an instrument, so tags are the only way to
+/// group. Free text that is not normalised would split "AI" and "ai" into two
+/// groups that never rank against each other.
+#[test]
+fn tags_are_normalised_and_deduplicated() {
+    use crate::workspace::Workspace;
+
+    let mut w = Workspace::default();
+    assert!(w.add_tag("AAA", "AI"));
+    assert!(!w.add_tag("AAA", "ai"), "same tag in another case");
+    assert!(!w.add_tag("AAA", "  Ai  "), "same tag with padding");
+    assert_eq!(w.tags_of("AAA"), ["ai"]);
+
+    assert!(!w.add_tag("AAA", "   "), "blank is not a tag");
+    assert!(!w.add_tag("", "ai"), "needs an instrument");
+
+    // Kept sorted, so the column reads the same way every time.
+    w.add_tag("AAA", "uranium");
+    w.add_tag("AAA", "cyber");
+    assert_eq!(w.tags_of("AAA"), ["ai", "cyber", "uranium"]);
+
+    assert!(w.has_tag("AAA", "cyber"));
+    assert!(!w.has_tag("AAA", "gold"));
+    assert!(!w.has_tag("BBB", "ai"));
+
+    // Removing the last tag drops the entry rather than leaving an empty list.
+    w.add_tag("BBB", "gold");
+    w.remove_tag("BBB", "gold");
+    assert!(w.tags_of("BBB").is_empty());
+    assert!(!w.tags.contains_key("BBB"));
+
+    // The filter row needs the union across instruments, deduplicated.
+    w.add_tag("CCC", "ai");
+    w.add_tag("CCC", "semis");
+    assert_eq!(w.all_tags(), ["ai", "cyber", "semis", "uranium"]);
+}
+
+/// Relative strength is the point: every window the quote carries must survive
+/// extraction, not just the intraday one the header uses.
+#[test]
+fn quote_keeps_every_performance_window() {
+    use crate::model::Window;
+
+    let q = Quote::from_json("CA53056H1047", sc::result(&envelope(QUOTE)));
+
+    assert!(close(q.perf.day.unwrap(), 4.52));
+    assert!(close(q.perf.week.unwrap(), 4.19));
+    assert!(close(q.perf.month.unwrap(), 10.67));
+    assert!(close(q.perf.quarter.unwrap(), 36.34));
+    assert!(close(q.perf.half.unwrap(), 77.02));
+    assert!(close(q.perf.year.unwrap(), 269.94));
+
+    // Lookup by window matches the field, for all of them.
+    assert_eq!(q.perf.get(Window::Week), q.perf.week);
+    assert_eq!(q.perf.get(Window::Quarter), q.perf.quarter);
+    for w in Window::ALL {
+        assert!(q.perf.get(w).is_some(), "{} missing", w.label());
+    }
+
+    // A quote with no performance block yields no windows rather than zeros,
+    // so an unranked instrument cannot masquerade as flat.
+    let seeded = Quote::from_watchlist_item(&serde_json::json!({"isin": "X"}));
+    assert!(Window::ALL.iter().all(|w| seeded.perf.get(*w).is_none()));
 }
