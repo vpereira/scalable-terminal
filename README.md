@@ -100,13 +100,22 @@ cargo run --release
 
 ## Stack
 
-Rust for the binary. No runtime to install.
+Rust.
 
 egui for the interface, through eframe and wgpu. Immediate mode suits a screen that is mostly dense tables changing several times a second: the table is a loop over current data, not a widget tree kept in sync. egui_plot draws the chart.
 
 Plain threads and channels, no async runtime. The UI runs on the main thread, one background thread owns all input and output, and a short lived pool of eight threads fans out quote requests. The work is slow subprocess calls, not thousands of sockets, so an async runtime would add machinery for nothing.
 
-Seven direct dependencies: eframe, egui, egui_extras, egui_plot, serde, serde_json, image. Around 186 crates once the graphics stack is counted.
+Dependencies: eframe, egui, egui_extras, egui_plot, serde, serde_json, image.
+
+## Storage
+
+No database. Broker state is never cached to disk, it is refetched from `sc` on every run. Only local state that the broker knows nothing about is written, as two JSON files in `~/.config/scalable-terminal/`:
+
+* `workspace.json` holds your custom lists and their ordering, the tags you apply to instruments, and interface preferences: refresh interval, chart style and timeframe, moving average toggles, bar density and the ranking column.
+* `trails.json` holds the high water mark of each armed trailing stop. That is the one piece of a trail that cannot be recovered from the broker, so it has to survive a restart.
+
+Delete either file and the app starts fresh with defaults.
 
 ## Screen
 
@@ -122,7 +131,7 @@ Three kinds of list:
 
 Custom lists exist partly because Scalable will not watchlist an instrument you own. The API accepts the request, answers `ok`, then reports `is_on_watchlist: false` and nothing appears. Tested across six instruments: held refused, unheld accepted. A local list has no such restriction, so a position can sit in Momentum next to everything else, flagged POS.
 
-Local state lives in `~/.config/scalable-terminal/workspace.json`, separate from broker state so a refresh can never discard it. Whichever list is showing, holdings are still priced, since position profit has to be marked against a live quote rather than a stale one.
+Whichever list is showing, holdings are still priced, since position profit has to be marked against a live quote rather than a stale one.
 
 ## Relative strength
 
@@ -132,17 +141,15 @@ Scalable exposes no sector or industry for an instrument. Nothing in `sc broker 
 
 That combination is the point. Tag a theme, filter to it, rank by 1M, and the leaders are the top rows.
 
-Tags live in `workspace.json` alongside the lists.
-
 ## Settings
 
-Interface preferences persist in the same file, under `prefs`:
+Preferences live under `prefs` in `workspace.json`:
 
 ```json
 "prefs": {
   "poll_secs": 45.0,
   "timeframe": "3m",
-  "candles": false,
+  "style": "Bars",
   "sma": [true, false, true],
   "bars_target": 140,
   "sort_by": "Quarter",
@@ -227,19 +234,19 @@ Unlike trailing stops, these live at the broker, so they work with the terminal 
 
 ## Trailing stops
 
-The CLI has no trailing order type and no amend command, so a trail cannot be handed to the broker. It is imitated: track the high water mark, and when the resting stop falls behind, cancel it and place a new one higher.
+A trailing stop follows the price up and never moves down, so it locks in gains while leaving room for the trend to continue.
 
-The app does the watching and the arithmetic, then asks before moving anything. Arm a trail on a position as a percentage or an absolute amount. When the stop should move, a button appears. Pressing it cancels the resting stop and previews the replacement through the usual confirm dialog.
+The CLI cannot place one, so the app imitates it. You arm a trail on a position, as a percentage or a fixed amount. The app then tracks the highest price seen and works out where the stop belongs. When the resting stop falls too far behind, a button appears. Press it and the app cancels the old stop and previews a new one higher up, through the normal confirm dialog.
 
-Interesting detail: the broker's own order schema carries a `trailing_stop_info` field, so the backend models trailing stops natively. The CLI exposes no way to set one.
+Nothing moves without you pressing that button.
 
-Constraints:
+Three things to know:
 
-* There is an unprotected window. Shares are committed to the resting stop, so the old order must be cancelled before a replacement can be previewed. Between the cancel and the confirmation there is no stop, and the panel says so in red while that holds.
-* It follows only while the app is running and the Mac is unlocked, in steps of the poll interval. Otherwise the stop stays where it was last placed.
-* It will not chase small moves. A replacement costs three calls and opens that window, so a ratchet is offered only once the improvement is worth a tenth of a percent.
+* Between cancelling the old stop and confirming the new one, the position has no stop at all. The broker forces that order, because the shares are tied up by the resting order. The panel shows it in red for as long as it lasts.
+* It only follows while the app is running and the Mac is unlocked. Otherwise the stop simply stays where it was last placed.
+* Small moves are ignored. Each adjustment costs three calls and opens that gap, so the button only appears once the improvement is worth at least a tenth of a percent.
 
-The high water mark persists to `~/.config/scalable-terminal/trails.json`, since it is the only part of a trail that cannot be recovered from the broker. The resting stop and share count are read back from live account state every refresh.
+The broker's own order records carry a `trailing_stop_info` field, so the backend supports trailing stops natively. The CLI just has no flag to set one, which is [issue #39](https://github.com/ScalableCapital/scalable-cli/issues/39) upstream. If that lands, all of the above collapses into a single order and the gap disappears.
 
 ## Data limits
 
