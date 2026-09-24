@@ -64,6 +64,34 @@ impl Performance {
     }
 }
 
+/// How the price series is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChartStyle {
+    Candles,
+    /// Open, high, low, close bars: a vertical range with an open tick on the
+    /// left and a close tick on the right. Denser than candles and easier to
+    /// read when bars are narrow.
+    Bars,
+    Line,
+}
+
+impl ChartStyle {
+    pub const ALL: [ChartStyle; 3] = [ChartStyle::Candles, ChartStyle::Bars, ChartStyle::Line];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ChartStyle::Candles => "Candles",
+            ChartStyle::Bars => "OHLC bars",
+            ChartStyle::Line => "Line",
+        }
+    }
+
+    /// Whether this style needs the tick series aggregated into bars.
+    pub fn needs_bars(self) -> bool {
+        !matches!(self, ChartStyle::Line)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Window {
     Day,

@@ -1,5 +1,5 @@
-use crate::model::Window;
 use crate::model::*;
+use crate::model::{ChartStyle, Window};
 use crate::shortcuts::{self, Act};
 use crate::worker::{self, Cmd, Handle, TIMEFRAMES, TradeIntent};
 use crate::workspace::{ListId, Workspace};
@@ -60,7 +60,7 @@ pub struct App {
     tab: Tab,
     timeframe: String,
     sma: [bool; 3],
-    candles: bool,
+    style: ChartStyle,
     bars_target: usize,
     deriv_type: usize,
     deriv_strategy: usize,
@@ -78,6 +78,10 @@ pub struct App {
     tag_input: String,
     alert_price: f64,
     prefs_saved: Option<std::time::Instant>,
+    /// What the plot last drew. egui_plot keeps pan and zoom per plot id, so
+    /// switching instruments must reset the view or the previous instrument's
+    /// bounds are applied to a series at a completely different price scale.
+    plotted: Option<(String, String)>,
     last_poll_set: Vec<String>,
     show_help: bool,
     /// Set when a shortcut asks for a text field; consumed on the next frame.
@@ -142,7 +146,7 @@ impl App {
             tab,
             timeframe: prefs.timeframe.clone(),
             sma: prefs.sma,
-            candles: prefs.candles,
+            style: prefs.style,
             bars_target: prefs.bars_target,
             deriv_type: 0,
             deriv_strategy: 0,
@@ -157,6 +161,7 @@ impl App {
             tag_input: String::new(),
             alert_price: 0.0,
             prefs_saved: None,
+            plotted: None,
             last_poll_set: Vec::new(),
             show_help: help_on_start,
             focus_search: false,
@@ -267,7 +272,7 @@ impl App {
         let current = crate::workspace::Prefs {
             poll_secs: self.poll_secs,
             timeframe: self.timeframe.clone(),
-            candles: self.candles,
+            style: self.style,
             sma: self.sma,
             bars_target: self.bars_target,
             sort_by: self.sort_by,
@@ -502,12 +507,21 @@ impl App {
 
             Act::PrevTimeframe => self.step_timeframe(-1),
             Act::NextTimeframe => self.step_timeframe(1),
-            Act::ToggleCandles => self.candles = !self.candles,
+            Act::ToggleCandles => {
+                // Cycle, since there are three styles rather than two.
+                let i = ChartStyle::ALL
+                    .iter()
+                    .position(|s| *s == self.style)
+                    .unwrap_or(0);
+                self.style = ChartStyle::ALL[(i + 1) % ChartStyle::ALL.len()];
+            }
             Act::Sma20 => self.sma[0] = !self.sma[0],
             Act::Sma50 => self.sma[1] = !self.sma[1],
             Act::Sma200 => self.sma[2] = !self.sma[2],
             Act::ResetZoom => {
-                ctx.memory_mut(|m| m.data.remove::<egui_plot::PlotMemory>("px".into()));
+                // Forces the auto fit path on the next frame, the same one used
+                // when the instrument changes.
+                self.plotted = None;
             }
 
             Act::SideBuy => self.side = Side::Buy,
@@ -2676,9 +2690,10 @@ impl App {
                 }
             }
             ui.separator();
-            ui.selectable_value(&mut self.candles, true, "Candles");
-            ui.selectable_value(&mut self.candles, false, "Line");
-            if self.candles {
+            for st in ChartStyle::ALL {
+                ui.selectable_value(&mut self.style, st, st.label());
+            }
+            if self.style.needs_bars() {
                 ui.add(
                     egui::DragValue::new(&mut self.bars_target)
                         .speed(1.0)
@@ -2819,7 +2834,7 @@ impl App {
             }
         });
 
-        let candles_spec: Option<(f64, Vec<Candle>)> = if self.candles {
+        let candles_spec: Option<(f64, Vec<Candle>)> = if self.style.needs_bars() {
             let bucket = chart.auto_bucket_secs(self.bars_target);
             let bars = chart.candles(bucket);
             (!bars.is_empty()).then_some((bucket, bars))
@@ -2829,8 +2844,13 @@ impl App {
         if let Some((bucket, bars)) = &candles_spec {
             ui.label(
                 RichText::new(format!(
-                    "{} candles of {} each, built from {} mid ticks (the API publishes no OHLC)",
+                    "{} {} of {} each, built from {} mid ticks (the API publishes no OHLC)",
                     bars.len(),
+                    if self.style == ChartStyle::Bars {
+                        "bars"
+                    } else {
+                        "candles"
+                    },
                     human_secs(*bucket),
                     chart.points.len()
                 ))
@@ -2842,9 +2862,18 @@ impl App {
         // Axis density: a full date stamp per mark is unreadable on an intraday span.
         let span_secs = chart.span_days() * 86_400.0;
 
-        egui_plot::Plot::new("px")
-            .allow_scroll(true)
-            .legend(egui_plot::Legend::default())
+        let key = (chart.isin.clone(), chart.timeframe.clone());
+        let switched = self.plotted.as_ref() != Some(&key);
+        if switched {
+            self.plotted = Some(key);
+        }
+
+        let mut plot = egui_plot::Plot::new("px").allow_scroll(true);
+        if switched {
+            // Auto fit to the new series rather than inheriting the old bounds.
+            plot = plot.reset();
+        }
+        plot.legend(egui_plot::Legend::default())
             .show_axes([true, true])
             .x_axis_formatter(move |mark, _| axis_time(mark.value, span_secs))
             .label_formatter(|pos| {
@@ -2862,7 +2891,32 @@ impl App {
                             .style(egui_plot::LineStyle::dashed_dense()),
                     );
                 }
-                if let Some((bucket, bars)) = candles_spec.as_ref() {
+                if let (ChartStyle::Bars, Some((bucket, bars))) =
+                    (self.style, candles_spec.as_ref())
+                {
+                    // An OHLC bar is one connected path: in at the open tick,
+                    // up the range, out at the close tick. Drawing it as a
+                    // single polyline costs one plot item per bar rather than
+                    // three, and the short retrace up the range is invisible
+                    // under a solid stroke.
+                    let tick = bucket * 0.32;
+                    for c in bars {
+                        let col = if c.up() { GREEN } else { RED };
+                        let x = c.t + bucket / 2.0;
+                        let path = vec![
+                            [x - tick, c.open],
+                            [x, c.open],
+                            [x, c.high],
+                            [x, c.low],
+                            [x, c.close],
+                            [x + tick, c.close],
+                        ];
+                        p.line(
+                            egui_plot::Line::new("", egui_plot::PlotPoints::from(path))
+                                .stroke(egui::Stroke::new(1.4, col)),
+                        );
+                    }
+                } else if let Some((bucket, bars)) = candles_spec.as_ref() {
                     // Two box plots, not one per bar: 90 separate plot items is
                     // needless work and clutters the legend.
                     let body = bucket * 0.62;

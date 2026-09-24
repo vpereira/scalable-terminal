@@ -1313,14 +1313,14 @@ fn prefs_are_clamped_on_load() {
 /// Preferences must survive a write and read, or nothing is actually persisted.
 #[test]
 fn prefs_round_trip_through_json() {
-    use crate::model::Window;
+    use crate::model::{ChartStyle, Window};
     use crate::workspace::{Prefs, Workspace};
 
     let mut w = Workspace {
         prefs: Prefs {
             poll_secs: 42.0,
             timeframe: "3m".into(),
-            candles: false,
+            style: ChartStyle::Bars,
             sma: [true, false, true],
             bars_target: 120,
             sort_by: Some(Window::Quarter),
@@ -1335,6 +1335,11 @@ fn prefs_round_trip_through_json() {
     let back: Workspace = serde_json::from_str(&text).unwrap();
 
     assert_eq!(back.prefs, w.prefs);
+    assert_eq!(
+        back.prefs.style,
+        ChartStyle::Bars,
+        "chart style survives the round trip"
+    );
     assert_eq!(back.prefs.sort_by, Some(Window::Quarter));
     assert_eq!(back.lists.len(), 1);
     assert_eq!(back.tags_of("AAA"), ["ai"]);
@@ -1463,4 +1468,29 @@ fn analytics_extracts_income_and_credit_buckets() {
     assert!(empty.styles.is_empty());
     assert_eq!(empty.distributions, None);
     assert_eq!(empty.investment_grade, 0);
+}
+
+/// Line is drawn straight from the tick series; the other two need those ticks
+/// aggregated into bars first. Getting this backwards draws an empty chart.
+#[test]
+fn only_bar_styles_need_aggregation() {
+    use crate::model::ChartStyle;
+
+    assert!(ChartStyle::Candles.needs_bars());
+    assert!(ChartStyle::Bars.needs_bars());
+    assert!(!ChartStyle::Line.needs_bars());
+
+    // Every style is reachable by cycling, and cycling returns to the start.
+    let mut st = ChartStyle::Candles;
+    let mut seen = vec![st];
+    for _ in 0..ChartStyle::ALL.len() - 1 {
+        let i = ChartStyle::ALL.iter().position(|s| *s == st).unwrap();
+        st = ChartStyle::ALL[(i + 1) % ChartStyle::ALL.len()];
+        seen.push(st);
+    }
+    assert_eq!(seen.len(), 3);
+    for s in ChartStyle::ALL {
+        assert!(seen.contains(&s), "{:?} unreachable by cycling", s);
+        assert!(!s.label().is_empty());
+    }
 }

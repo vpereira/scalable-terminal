@@ -162,7 +162,7 @@ Right column: cash and buying power, positions with cost basis and unrealised pr
 
 Main area:
 
-* Chart. Candles or line, previous close as a dashed baseline. Timeframes 1d, 7d, 1m, 3m, 6m, ytd, 1y, max. Moving averages at 20, 50 and 200 days.
+* Chart. Candles, OHLC bars or a line, with the previous close as a dashed baseline. Timeframes 1d, 7d, 1m, 3m, 6m, ytd, 1y, max. Moving averages at 20, 50 and 200 days.
 * Derivatives. Knockouts, factor certificates and warrants on whatever instrument you last clicked, filtered by family and direction. Leverage, strike, knockout barrier, distance to barrier, premium, expiry. Clicking a row makes that derivative the active instrument.
 * Portfolio. Totals, return per timeframe, holdings with weight and profit, allocation by product type, asset class, sector and region, diversification scores, a style grid, income and credit quality, and stress scenarios against a benchmark.
 * Log. Every `sc` invocation, timed.
@@ -247,7 +247,7 @@ No streaming. No websocket or server sent events in the CLI, so prices are polle
 
 No market depth. Level one only.
 
-No OHLC. The chart endpoint returns mid price ticks, so candles are built here by bucketing ticks into intervals. Open and close are the first and last tick in a bucket, high and low its extremes. Empty buckets are skipped rather than carried forward, so a gap stays a gap instead of becoming a flat bar that never traded.
+No OHLC. The chart endpoint returns mid price ticks, so candles and bars are built here by bucketing ticks into intervals. Open and close are the first and last tick in a bucket, high and low its extremes. Empty buckets are skipped rather than carried forward, so a gap stays a gap instead of becoming a flat bar that never traded.
 
 The chart endpoint downsamples by span and never returns more than about 190 points:
 

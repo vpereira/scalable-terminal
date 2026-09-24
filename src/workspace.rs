@@ -5,7 +5,7 @@
 //! later tags and notes. Kept separate so a broker refresh can never discard
 //! local work, and local edits can never be mistaken for account state.
 
-use crate::model::Window;
+use crate::model::{ChartStyle, Window};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -73,7 +73,7 @@ pub struct Prefs {
     /// Seconds between quote rounds. Zero means paused.
     pub poll_secs: f32,
     pub timeframe: String,
-    pub candles: bool,
+    pub style: ChartStyle,
     pub sma: [bool; 3],
     pub bars_target: usize,
     pub sort_by: Option<Window>,
@@ -85,7 +85,7 @@ impl Default for Prefs {
         Prefs {
             poll_secs: 10.0,
             timeframe: "1d".into(),
-            candles: true,
+            style: ChartStyle::Candles,
             sma: [false, false, false],
             bars_target: 90,
             sort_by: Some(Window::Week),
