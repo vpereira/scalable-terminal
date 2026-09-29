@@ -15,6 +15,11 @@ use std::time::{Duration, Instant};
 
 pub const QUOTE_FANOUT: usize = 8;
 pub const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(90);
+/// Gap between backfill requests. The chart endpoint refused eight rapid calls
+/// and took 46 seconds to recover, so this stays well clear of that.
+pub const BACKFILL_INTERVAL: Duration = Duration::from_secs(12);
+/// Daily movement over three months does not change meaningfully within a day.
+pub const STATS_MAX_AGE_SECS: f64 = 86_400.0;
 pub const RATE_LIMIT_BACKOFF_MAX: Duration = Duration::from_secs(900);
 
 /// Which instruments to poll this round.
@@ -184,9 +189,13 @@ pub struct Shared {
     pub chart_loading: bool,
     /// Charts are expensive and rate limited; keep what we have fetched.
     pub chart_cache: HashMap<(String, String), Chart>,
-    /// Derived per instrument as charts load, so it costs no extra requests.
-    /// Populates as you browse rather than all at once.
+    /// Derived per instrument from its chart series. Backfilled slowly in the
+    /// background and persisted, because the chart endpoint rate limits hard
+    /// and these figures barely move from one day to the next.
     pub stats: HashMap<String, SeriesStats>,
+    /// When each entry was computed, as epoch seconds.
+    pub stats_at: HashMap<String, f64>,
+    last_backfill: Option<Instant>,
     pub derivatives: DerivativesPage,
     pub derivatives_error: Option<String>,
     pub derivatives_loading: bool,
@@ -295,7 +304,13 @@ fn worker_loop(
     poll: Arc<Mutex<Duration>>,
 ) {
     check_session(&state);
-    state.lock().unwrap().trails = load_trails();
+    {
+        let mut s = state.lock().unwrap();
+        s.trails = load_trails();
+        let (stats, at) = load_stats();
+        s.stats = stats;
+        s.stats_at = at;
+    }
     ctx.request_repaint();
 
     let mut next_poll = Instant::now();
@@ -314,6 +329,8 @@ fn worker_loop(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
+
+        backfill_one(&state, &ctx);
 
         // Once the backoff lapses, make good on the retry we promised.
         let retry = {
@@ -918,6 +935,95 @@ fn refresh_quotes(state: &Arc<Mutex<Shared>>, isins: &[String]) {
     }
 }
 
+/// The window every instrument's statistics are measured over.
+///
+/// Fixed deliberately: the column exists to compare instruments, and a figure
+/// from three months is not comparable with one from a year.
+const STATS_TIMEFRAME: &str = "3m";
+
+/// Fetch stats for one instrument that lacks them, at a deliberate crawl.
+///
+/// This exists because the figures are only useful as a column you can compare
+/// across the list, and fetching a chart per instrument in a burst is exactly
+/// what the rate limiter refuses. One every few seconds fills a watchlist in a
+/// couple of minutes and is then persisted, so it happens once rather than at
+/// every launch.
+fn backfill_one(state: &Arc<Mutex<Shared>>, ctx: &egui::Context) {
+    let target = {
+        let mut s = state.lock().unwrap();
+        if s.backoff_secs_left().is_some() {
+            return;
+        }
+        if s.last_backfill
+            .is_some_and(|t| t.elapsed() < BACKFILL_INTERVAL)
+        {
+            return;
+        }
+        let now = now_secs();
+        let stale = |isin: &String| {
+            s.stats_at
+                .get(isin)
+                .is_none_or(|t| now - t > STATS_MAX_AGE_SECS)
+        };
+        let next = s.poll_targets().into_iter().find(stale);
+        if next.is_some() {
+            s.last_backfill = Some(Instant::now());
+        }
+        next
+    };
+    let Some(isin) = target else { return };
+
+    // Three months gives daily sampling, which is what the statistics need.
+    let call = sc::run(&[
+        "broker",
+        "chart",
+        "--isin",
+        &isin,
+        "--timeframe",
+        STATS_TIMEFRAME,
+    ]);
+    let mut s = state.lock().unwrap();
+    match &call.data {
+        Ok(v) => {
+            let chart = Chart::from_json(sc::result(v));
+            match SeriesStats::from_chart(&chart) {
+                Some(st) => {
+                    s.stats.insert(isin.clone(), st);
+                    s.stats_at.insert(isin.clone(), now_secs());
+                    s.push_log(
+                        "stats",
+                        call.elapsed.as_millis(),
+                        true,
+                        format!("{isin}: {:.2}%/day", st.daily_move * 100.0),
+                    );
+                }
+                None => {
+                    // Mark it done so a series that can never yield statistics
+                    // is not retried every pass.
+                    s.stats_at.insert(isin.clone(), now_secs());
+                    s.push_log(
+                        "stats",
+                        call.elapsed.as_millis(),
+                        false,
+                        format!("{isin}: unusable series"),
+                    );
+                }
+            }
+            s.chart_cache.insert((isin, STATS_TIMEFRAME.into()), chart);
+            let (stats, at) = (s.stats.clone(), s.stats_at.clone());
+            drop(s);
+            save_stats(&stats, &at);
+            ctx.request_repaint();
+        }
+        Err(e) => {
+            if e.kind == sc::ScErrorKind::RateLimited {
+                s.note_rate_limit("stats backfill");
+            }
+            s.push_log("stats", call.elapsed.as_millis(), false, e.to_string());
+        }
+    }
+}
+
 fn load_chart(state: &Arc<Mutex<Shared>>, isin: &str, timeframe: &str, force: bool) {
     let key = (isin.to_string(), timeframe.to_string());
     {
@@ -944,9 +1050,6 @@ fn load_chart(state: &Arc<Mutex<Shared>>, isin: &str, timeframe: &str, force: bo
     match &call.data {
         Ok(v) => {
             let chart = Chart::from_json(sc::result(v));
-            if let Some(st) = SeriesStats::from_chart(&chart) {
-                s.stats.insert(isin.to_string(), st);
-            }
             let n = chart.points.len();
             s.chart_cache.insert(key, chart.clone());
             s.chart = chart;
@@ -983,6 +1086,78 @@ fn load_chart(state: &Arc<Mutex<Shared>>, isin: &str, timeframe: &str, force: bo
             );
         }
     }
+}
+
+pub fn now_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn stats_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".config/scalable-terminal/stats.json")
+}
+
+/// Derived data, so losing it costs only the time to recompute. Persisted
+/// anyway because recomputing means one rate limited chart call per instrument.
+fn save_stats(stats: &HashMap<String, SeriesStats>, at: &HashMap<String, f64>) {
+    let rows: Vec<Value> = stats
+        .iter()
+        .map(|(isin, st)| {
+            serde_json::json!({
+                "isin": isin,
+                "daily_move": st.daily_move,
+                "daily_vol": st.daily_vol,
+                "annual_vol": st.annual_vol,
+                "points": st.points,
+                "interval_days": st.interval_days,
+                "span_days": st.span_days,
+                "at": at.get(isin).copied().unwrap_or(0.0),
+            })
+        })
+        .collect();
+    let path = stats_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(
+        path,
+        serde_json::to_string_pretty(&rows).unwrap_or_default(),
+    );
+}
+
+type StatsSnapshot = (HashMap<String, SeriesStats>, HashMap<String, f64>);
+
+pub fn load_stats() -> StatsSnapshot {
+    let mut stats = HashMap::new();
+    let mut at = HashMap::new();
+    let Ok(txt) = std::fs::read_to_string(stats_path()) else {
+        return (stats, at);
+    };
+    let Ok(rows) = serde_json::from_str::<Vec<Value>>(&txt) else {
+        return (stats, at);
+    };
+    for r in rows {
+        let Some(isin) = sc::str_at(&r, &["isin"]) else {
+            continue;
+        };
+        let g = |k: &str| sc::f64_at(&r, &[k]).unwrap_or(0.0);
+        let st = SeriesStats {
+            daily_move: g("daily_move"),
+            daily_vol: g("daily_vol"),
+            annual_vol: g("annual_vol"),
+            points: g("points") as usize,
+            interval_days: g("interval_days"),
+            span_days: g("span_days"),
+        };
+        if st.daily_move > 0.0 {
+            at.insert(isin.clone(), g("at"));
+            stats.insert(isin, st);
+        }
+    }
+    (stats, at)
 }
 
 fn trails_path() -> std::path::PathBuf {

@@ -135,7 +135,9 @@ Whichever list is showing, holdings are still priced, since position profit has 
 
 ## Instrument statistics
 
-Derived from the chart series when you open an instrument, so they cost no extra requests and fill in as you browse.
+Derived from each instrument's chart series, fetched in the background one instrument every twelve seconds so the chart endpoint's rate limit is never provoked. A watchlist fills in about two minutes, then persists to `stats.json` and refreshes once a day, so it happens once rather than at every launch.
+
+Every instrument is measured over the same three month window. A figure from three months is not comparable with one from a year, and comparison is the entire point of the column.
 
 **Spr days** in the watchlist is the round trip spread divided by typical daily movement: how long a trade has to work before the spread is paid for. Colour coded, because under about half a day is tradable and over a day and a half is not.
 
@@ -148,7 +150,7 @@ Village Farms   358 bps / 2.11%  =  1.7 days
 
 The chart header adds typical daily movement and annualised volatility.
 
-Two honesty notes. This is **not** average daily range. Scalable publishes no high or low, only mid ticks, so it is mean absolute close to close change and understates true intraday range, usually by about half. And the figures are only computed when the series is sampled between roughly half a day and five days apart, with at least twenty observations. Intraday ticks extrapolated to a day, or the monthly sampling the `max` timeframe returns, produce nothing rather than a number that looks authoritative and is not.
+Two honesty notes. This is **not** average daily range. Scalable publishes no high or low, only mid ticks, so it is mean absolute close to close change and understates true intraday range, usually by about half. And the figures are only computed when the series is sampled between roughly half a day and five days apart, with at least twenty observations. Intraday ticks extrapolated to a day, or a monthly priced fund that returns three points in three months, produce nothing rather than a number that looks authoritative and is not.
 
 For the same reason there is no 52 week high or low. Deriving it from the 1y series, which samples every two days, missed the real high by 15% on a test instrument, which would misstate position in range by 13 points.
 

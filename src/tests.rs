@@ -1597,3 +1597,33 @@ fn spread_in_days_measures_the_hurdle() {
     };
     assert!(flat.spread_in_days(0.04).is_none());
 }
+
+/// Statistics are only comparable if every instrument is measured over the same
+/// window, so the backfill pins the timeframe rather than reusing whatever
+/// chart the user happens to have open.
+#[test]
+fn stats_come_from_a_series_that_can_support_them() {
+    use crate::model::{Chart, ChartPoint, SeriesStats};
+
+    let mk = |n: usize, step_days: f64| Chart {
+        points: (0..n)
+            .map(|i| ChartPoint {
+                t: i as f64 * step_days * 86_400.0,
+                mid: 100.0 * (1.0 + 0.01 * ((i % 7) as f64 - 3.0)),
+                ts: String::new(),
+            })
+            .collect(),
+        ..Default::default()
+    };
+
+    // What `3m` actually returns: about 67 daily points over 92 days.
+    let three_month = mk(67, 1.0);
+    let st = SeriesStats::from_chart(&three_month).expect("3m series is usable");
+    assert_eq!(st.points, 67);
+    assert!((st.interval_days - 1.0).abs() < 0.05);
+    assert!(st.daily_move > 0.0 && st.annual_vol > 0.0);
+
+    // A monthly priced fund returns three points, which cannot yield anything.
+    // Observed live on a private equity fund in the watchlist.
+    assert!(SeriesStats::from_chart(&mk(3, 31.0)).is_none());
+}
