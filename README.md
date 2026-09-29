@@ -133,6 +133,25 @@ Custom lists exist partly because Scalable will not watchlist an instrument you 
 
 Whichever list is showing, holdings are still priced, since position profit has to be marked against a live quote rather than a stale one.
 
+## Instrument statistics
+
+Derived from the chart series when you open an instrument, so they cost no extra requests and fill in as you browse.
+
+**Spr days** in the watchlist is the round trip spread divided by typical daily movement: how long a trade has to work before the spread is paid for. Colour coded, because under about half a day is tradable and over a day and a half is not.
+
+```
+H&R              27 bps / 1.51%  =  0.2 days
+COSCO           258 bps / 2.76%  =  0.9 days
+Liberty Gold    332 bps / 3.28%  =  1.0 days
+Village Farms   358 bps / 2.11%  =  1.7 days
+```
+
+The chart header adds typical daily movement and annualised volatility.
+
+Two honesty notes. This is **not** average daily range. Scalable publishes no high or low, only mid ticks, so it is mean absolute close to close change and understates true intraday range, usually by about half. And the figures are only computed when the series is sampled between roughly half a day and five days apart, with at least twenty observations. Intraday ticks extrapolated to a day, or the monthly sampling the `max` timeframe returns, produce nothing rather than a number that looks authoritative and is not.
+
+For the same reason there is no 52 week high or low. Deriving it from the 1y series, which samples every two days, missed the real high by 15% on a test instrument, which would misstate position in range by 13 points.
+
 ## Relative strength
 
 Every quote carries its trailing performance, so the strip shows 1D, 1W, 1M, 3M, 6M and 1Y as columns. Click a header to rank by that window, click it again to flip the direction. Instruments with no reading sort to the bottom rather than counting as zero, which would drop an unpriced row into the middle of the pack.

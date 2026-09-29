@@ -184,6 +184,9 @@ pub struct Shared {
     pub chart_loading: bool,
     /// Charts are expensive and rate limited; keep what we have fetched.
     pub chart_cache: HashMap<(String, String), Chart>,
+    /// Derived per instrument as charts load, so it costs no extra requests.
+    /// Populates as you browse rather than all at once.
+    pub stats: HashMap<String, SeriesStats>,
     pub derivatives: DerivativesPage,
     pub derivatives_error: Option<String>,
     pub derivatives_loading: bool,
@@ -941,6 +944,9 @@ fn load_chart(state: &Arc<Mutex<Shared>>, isin: &str, timeframe: &str, force: bo
     match &call.data {
         Ok(v) => {
             let chart = Chart::from_json(sc::result(v));
+            if let Some(st) = SeriesStats::from_chart(&chart) {
+                s.stats.insert(isin.to_string(), st);
+            }
             let n = chart.points.len();
             s.chart_cache.insert(key, chart.clone());
             s.chart = chart;

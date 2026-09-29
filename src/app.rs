@@ -807,13 +807,14 @@ impl App {
             .min_size(120.0)
             .max_size(600.0)
             .show(ui, |ui| {
-            let (watchlist, holdings, quotes, names, wl_error) = {
+            let (watchlist, holdings, quotes, names, stats, wl_error) = {
                 let s = self.io.state.lock().unwrap();
                 (
                     s.watchlist.clone(),
                     s.holdings.clone(),
                     s.quotes.clone(),
                     s.names.clone(),
+                    s.stats.clone(),
                     s.watchlist_error.clone(),
                 )
             };
@@ -1114,7 +1115,7 @@ impl App {
                             }
                         });
                     }
-                    for t in ["Spr bps", "Tags"] {
+                    for t in ["Spr bps", "Spr days", "Tags"] {
                         h.col(|ui| {
                             ui.label(RichText::new(t).strong());
                         });
@@ -1195,6 +1196,26 @@ impl App {
                             };
                             ui.label(RichText::new(num(q.spread_bps(), 1)).color(c).monospace())
                                 .on_hover_text(format!("absolute spread {}", num(q.spread_abs(), 4)));
+                        });
+                        row.col(|ui| {
+                            // How long the trade must work before the spread is
+                            // paid for. Blank until this instrument's chart has
+                            // been loaded once.
+                            let d = stats
+                                .get(&q.isin)
+                                .zip(q.spread_bps())
+                                .and_then(|(st, bps)| st.spread_in_days(bps / 10_000.0));
+                            let c = match d {
+                                Some(x) if x > 1.5 => RED,
+                                Some(x) if x > 0.7 => AMBER,
+                                Some(_) => GREEN,
+                                None => DIM,
+                            };
+                            ui.label(RichText::new(num(d, 1)).color(c).monospace())
+                                .on_hover_text(
+                                    "days of average movement the round trip spread costs\n\
+                                     loads once you open the instrument's chart",
+                                );
                         });
                         row.col(|ui| {
                             let tags = self.workspace.tags_of(&q.isin).to_vec();
@@ -2750,7 +2771,47 @@ impl App {
                     )
                 });
             }
-            if let Some(g) = chart.median_spacing_secs() {
+            // Named for what it is. Scalable publishes no high or low, so this is
+        // close to close movement, not a true daily range.
+        let quote_spread_bps = {
+            let s = self.io.state.lock().unwrap();
+            s.quotes.get(&chart.isin).and_then(|q| q.spread_bps())
+        };
+
+        let st = { self.io.state.lock().unwrap().stats.get(&chart.isin).copied() };
+        if let Some(st) = st {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("typical daily move {:.2}%", st.daily_move * 100.0))
+                        .color(DIM),
+                )
+                .on_hover_text(
+                    "mean absolute close to close change, rescaled to one day\n\
+                     the API gives no high or low, so true daily range is larger",
+                );
+                ui.separator();
+                ui.label(
+                    RichText::new(format!("volatility {:.0}% annualised", st.annual_vol * 100.0))
+                        .color(DIM),
+                )
+                .on_hover_text(format!(
+                    "daily {:.2}%, from {} points over {:.0} days",
+                    st.daily_vol * 100.0,
+                    st.points,
+                    st.span_days
+                ));
+                if let Some(bps) = quote_spread_bps
+                    && let Some(d) = st.spread_in_days(bps / 10_000.0) {
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!("spread costs {d:.1} days of movement"))
+                                .color(if d > 1.5 { RED } else if d > 0.7 { AMBER } else { GREEN }),
+                        );
+                    }
+            });
+        }
+
+        if let Some(g) = chart.median_spacing_secs() {
                 ui.label(
                     RichText::new(format!(
                         "· {} points over {:.0}d, one every {}",

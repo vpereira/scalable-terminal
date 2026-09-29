@@ -1168,3 +1168,80 @@ impl SecurityNews {
         self.short.is_empty() && self.long.is_empty() && self.sources.is_empty()
     }
 }
+
+/// Statistics derived from a price series.
+///
+/// Scalable publishes no high or low, only mid ticks, so there is no true
+/// average daily range here. `daily_move` is the mean absolute change between
+/// observations, rescaled to one day. It understates real intraday range,
+/// typically by about half, and is named to avoid implying otherwise.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SeriesStats {
+    /// Mean absolute daily change, as a fraction.
+    pub daily_move: f64,
+    /// Standard deviation of daily returns, as a fraction.
+    pub daily_vol: f64,
+    /// Annualised from the daily figure.
+    pub annual_vol: f64,
+    pub points: usize,
+    pub interval_days: f64,
+    pub span_days: f64,
+}
+
+impl SeriesStats {
+    /// Sampling coarser than this cannot be rescaled to a day with a straight
+    /// face, and finer than this is intraday noise being extrapolated.
+    const MIN_INTERVAL_DAYS: f64 = 0.4;
+    const MAX_INTERVAL_DAYS: f64 = 5.0;
+    const MIN_POINTS: usize = 20;
+
+    /// Returns nothing when the series cannot support an honest daily figure,
+    /// rather than a number that looks authoritative and is not.
+    pub fn from_chart(c: &Chart) -> Option<SeriesStats> {
+        if c.points.len() < Self::MIN_POINTS {
+            return None;
+        }
+        let interval = c.median_spacing_secs()? / 86_400.0;
+        if !(Self::MIN_INTERVAL_DAYS..=Self::MAX_INTERVAL_DAYS).contains(&interval) {
+            return None;
+        }
+
+        let rets: Vec<f64> = c
+            .points
+            .windows(2)
+            .filter(|w| w[0].mid > 0.0)
+            .map(|w| w[1].mid / w[0].mid - 1.0)
+            .collect();
+        if rets.len() < Self::MIN_POINTS {
+            return None;
+        }
+
+        let n = rets.len() as f64;
+        let mean = rets.iter().sum::<f64>() / n;
+        let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        let mean_abs = rets.iter().map(|r| r.abs()).sum::<f64>() / n;
+
+        // Returns measured over `interval` days scale with its square root, so
+        // divide to express both figures per day.
+        let scale = interval.sqrt();
+        let daily_vol = var.sqrt() / scale;
+
+        Some(SeriesStats {
+            daily_move: mean_abs / scale,
+            daily_vol,
+            annual_vol: daily_vol * 252.0_f64.sqrt(),
+            points: c.points.len(),
+            interval_days: interval,
+            span_days: c.span_days(),
+        })
+    }
+
+    /// How many average days of movement the round trip spread consumes.
+    ///
+    /// This is the number that decides whether a short swing can pay for
+    /// itself: a spread costing two days of typical movement needs the trade to
+    /// be right for two days before it breaks even.
+    pub fn spread_in_days(&self, spread_fraction: f64) -> Option<f64> {
+        (self.daily_move > 0.0 && spread_fraction > 0.0).then(|| spread_fraction / self.daily_move)
+    }
+}

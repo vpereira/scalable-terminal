@@ -1494,3 +1494,106 @@ fn only_bar_styles_need_aggregation() {
         assert!(!s.label().is_empty());
     }
 }
+
+/// Returns sampled every `k` days scale with the square root of `k`, so both
+/// figures must be divided by it to express a daily number. Getting this wrong
+/// would overstate volatility on the coarser timeframes by ~40%.
+#[test]
+fn series_stats_rescale_sampling_to_one_day() {
+    use crate::model::{Chart, ChartPoint, SeriesStats};
+
+    // Same underlying path, sampled daily and then every second day.
+    let mk = |step_days: f64, n: usize| {
+        let mut pts = Vec::new();
+        let mut px = 100.0_f64;
+        for i in 0..n {
+            // Deterministic alternating drift, so the two series describe the
+            // same movement at different resolutions.
+            px *= if i % 2 == 0 { 1.02 } else { 0.98 };
+            pts.push(ChartPoint {
+                t: i as f64 * step_days * 86_400.0,
+                mid: px,
+                ts: String::new(),
+            });
+        }
+        Chart {
+            points: pts,
+            ..Default::default()
+        }
+    };
+
+    let daily = SeriesStats::from_chart(&mk(1.0, 120)).expect("daily series");
+    assert!((daily.interval_days - 1.0).abs() < 1e-6);
+    // Annualisation is the daily figure times sqrt(252).
+    assert!((daily.annual_vol / daily.daily_vol - 252.0_f64.sqrt()).abs() < 1e-6);
+
+    let two_day = SeriesStats::from_chart(&mk(2.0, 120)).expect("two day series");
+    assert!((two_day.interval_days - 2.0).abs() < 1e-6);
+    // The two day series is rescaled, so its daily figure lands near the daily
+    // one rather than sqrt(2) above it.
+    let unscaled_ratio = two_day.daily_vol * 2.0_f64.sqrt() / daily.daily_vol;
+    assert!(
+        two_day.daily_vol < unscaled_ratio * daily.daily_vol,
+        "rescaling must reduce the coarser reading"
+    );
+}
+
+/// A series that cannot support an honest daily number must yield none, rather
+/// than a figure that looks authoritative.
+#[test]
+fn series_stats_refuse_unusable_sampling() {
+    use crate::model::{Chart, ChartPoint, SeriesStats};
+
+    let mk = |step_days: f64, n: usize| Chart {
+        points: (0..n)
+            .map(|i| ChartPoint {
+                t: i as f64 * step_days * 86_400.0,
+                mid: 100.0 + i as f64,
+                ts: String::new(),
+            })
+            .collect(),
+        ..Default::default()
+    };
+
+    // Too few observations.
+    assert!(SeriesStats::from_chart(&mk(1.0, 5)).is_none());
+    // Intraday ticks: extrapolating a day from ten minute moves is not honest.
+    assert!(SeriesStats::from_chart(&mk(0.007, 150)).is_none());
+    // Monthly sampling, as the max timeframe returns.
+    assert!(SeriesStats::from_chart(&mk(30.0, 100)).is_none());
+    // Empty.
+    assert!(SeriesStats::from_chart(&Chart::default()).is_none());
+
+    // Daily sampling is accepted.
+    assert!(SeriesStats::from_chart(&mk(1.0, 60)).is_some());
+}
+
+/// The spread in days is what decides whether a short swing can pay for itself.
+#[test]
+fn spread_in_days_measures_the_hurdle() {
+    use crate::model::SeriesStats;
+
+    let st = SeriesStats {
+        daily_move: 0.02,
+        daily_vol: 0.03,
+        annual_vol: 0.48,
+        points: 60,
+        interval_days: 1.0,
+        span_days: 60.0,
+    };
+
+    // A 4% spread against 2% of daily movement is two days of hurdle.
+    assert!((st.spread_in_days(0.04).unwrap() - 2.0).abs() < 1e-9);
+    // A tight spread on the same instrument is a fraction of a day.
+    assert!(st.spread_in_days(0.002).unwrap() < 0.11);
+    // Wider spread, more days. Always.
+    assert!(st.spread_in_days(0.08).unwrap() > st.spread_in_days(0.04).unwrap());
+    assert!(st.spread_in_days(0.0).is_none());
+
+    // An instrument that does not move cannot pay for any spread.
+    let flat = SeriesStats {
+        daily_move: 0.0,
+        ..st
+    };
+    assert!(flat.spread_in_days(0.04).is_none());
+}
