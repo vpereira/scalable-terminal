@@ -196,6 +196,11 @@ pub struct Shared {
     /// When each entry was computed, as epoch seconds.
     pub stats_at: HashMap<String, f64>,
     last_backfill: Option<Instant>,
+    /// When the account state last came back from the broker, and whether a
+    /// refresh is in flight. Without this the UI cannot say how stale it is,
+    /// and pressing refresh looks like nothing happened.
+    pub last_refresh: Option<Instant>,
+    pub refreshing: bool,
     pub derivatives: DerivativesPage,
     pub derivatives_error: Option<String>,
     pub derivatives_loading: bool,
@@ -613,6 +618,7 @@ fn check_session(state: &Arc<Mutex<Shared>>) {
 }
 
 fn refresh_account(state: &Arc<Mutex<Shared>>) {
+    state.lock().unwrap().refreshing = true;
     // Five independent endpoints. Serially that is ~1 s on every refresh, and a
     // refresh follows every submit and cancel — so fan them out.
     let (mut ov, mut cash, mut hd, mut tx, mut an, mut al) = (None, None, None, None, None, None);
@@ -727,6 +733,8 @@ fn refresh_account(state: &Arc<Mutex<Shared>>) {
             e.to_string(),
         ),
     }
+    s.refreshing = false;
+    s.last_refresh = Some(Instant::now());
     match &al.data {
         Ok(v) => {
             s.alerts = PriceAlert::list_from(sc::result(v));

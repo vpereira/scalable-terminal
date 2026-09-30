@@ -119,7 +119,9 @@ Delete either file and the app starts fresh with defaults.
 
 ## Screen
 
-Top bar: session, last quote round time and instrument count, poll interval, refresh buttons, rate limit countdown, view tabs.
+Top bar: session, last quote round time and instrument count, poll interval, how long ago the account last synced, refresh buttons, rate limit countdown, view tabs.
+
+The synced label covers holdings, orders, cash and alerts, which only change when you trade, and is separate from the quote round that runs on its own interval. Pressing Refresh all replaces it with a spinner until the round completes, so the button visibly does something.
 
 Watchlist strip, with a list selector across the top. Columns are bid, ask, mid, intraday change and spread in basis points, colour coded. A marker flags quotes the broker considers stale.
 

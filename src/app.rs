@@ -447,9 +447,9 @@ impl eframe::App for App {
         self.sync_prefs();
         // Nothing completes during a backoff, so nothing would request a repaint
         // and the countdown would sit frozen until the mouse moved.
-        if self.io.state.lock().unwrap().backoff_secs_left().is_some() {
-            ctx.request_repaint_after(Duration::from_millis(500));
-        }
+        // The synced-ago label and any backoff countdown both age in real time,
+        // so keep repainting even when nothing else is happening.
+        ctx.request_repaint_after(Duration::from_millis(500));
         self.autoselect();
         self.top_bar(ui);
         self.right_panel(ui);
@@ -771,6 +771,38 @@ impl App {
                         .color(if level > 2 { RED } else { AMBER })
                         .monospace(),
                     );
+                }
+
+                ui.separator();
+                // Say how stale the account data is, and show the refresh
+                // actually doing something. Without both, pressing the button
+                // gives no feedback at all.
+                let (since, busy) = {
+                    let s = self.io.state.lock().unwrap();
+                    (s.last_refresh.map(|t| t.elapsed()), s.refreshing)
+                };
+                if busy {
+                    ui.spinner();
+                    ui.label(RichText::new("syncing").color(AMBER).monospace());
+                } else {
+                    let (txt, col) = match since {
+                        Some(d) => {
+                            let secs = d.as_secs();
+                            let t = if secs < 60 {
+                                format!("synced {secs}s ago")
+                            } else if secs < 3600 {
+                                format!("synced {}m ago", secs / 60)
+                            } else {
+                                format!("synced {}h ago", secs / 3600)
+                            };
+                            // Holdings and orders only move when you trade, but
+                            // an hour old view is worth flagging.
+                            (t, if secs > 3600 { AMBER } else { DIM })
+                        }
+                        None => ("not synced yet".into(), AMBER),
+                    };
+                    ui.label(RichText::new(txt).color(col).monospace())
+                        .on_hover_text("age of holdings, orders, cash and alerts\nquotes refresh on their own interval");
                 }
 
                 ui.separator();
