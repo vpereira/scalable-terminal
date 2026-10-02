@@ -1,5 +1,5 @@
 use crate::model::*;
-use crate::model::{ChartStyle, TradePlan, Window};
+use crate::model::{ChartStyle, PlanContext, PositionPlan, TradePlan, Window};
 use crate::shortcuts::{self, Act};
 use crate::worker::{self, Cmd, Handle, TIMEFRAMES, TradeIntent};
 use crate::workspace::{ListId, Workspace};
@@ -1356,6 +1356,7 @@ impl App {
                     });
 
                     self.positions(ui);
+                    self.position_plan(ui);
                     self.orders(ui);
                     self.alerts(ui);
                     self.trails(ui);
@@ -1460,6 +1461,142 @@ impl App {
         if let Some(p) = pick {
             self.select(p);
         }
+    }
+
+    /// The same questions as the order plan, asked of a position you hold.
+    ///
+    /// Appears when the selected instrument is one of yours, because the
+    /// numbers that matter then are different: what a sale returns now, how far
+    /// the market still has to move to break even, and what a stop costs from
+    /// here rather than from entry.
+    fn position_plan(&mut self, ui: &mut egui::Ui) {
+        let Some(isin) = self.selected.clone() else {
+            return;
+        };
+        let (held, quote, sigma, account) = {
+            let s = self.io.state.lock().unwrap();
+            (
+                s.holdings.iter().find(|h| h.isin == isin).cloned(),
+                s.quotes.get(&isin).cloned(),
+                s.stats.get(&isin).map(|st| st.daily_vol),
+                s.account.total.unwrap_or(0.0),
+            )
+        };
+        let (Some(h), Some(q), Some(sigma)) = (held, quote, sigma) else {
+            return;
+        };
+        let (Some(bid), Some(cost)) = (q.bid, h.fifo_price) else {
+            return;
+        };
+        let half = q.spread_bps().unwrap_or(0.0) / 20_000.0;
+        let ctx = PlanContext {
+            sigma,
+            half_spread: half,
+            stop_sigmas: self.plan_stop_sigmas,
+            target_sigmas: self.plan_target_sigmas,
+            account,
+        };
+        let Some(p) = PositionPlan::build(h.quantity, cost, bid, &ctx) else {
+            return;
+        };
+
+        let title = format!("Position {}", h.name);
+        section(ui, &title, None, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("stop").color(DIM).small());
+                ui.add(
+                    egui::DragValue::new(&mut self.plan_stop_sigmas)
+                        .speed(0.1)
+                        .range(0.2..=5.0)
+                        .suffix(" sd"),
+                );
+                ui.label(RichText::new("target").color(DIM).small());
+                ui.add(
+                    egui::DragValue::new(&mut self.plan_target_sigmas)
+                        .speed(0.1)
+                        .range(0.2..=10.0)
+                        .suffix(" sd"),
+                );
+                ui.label(
+                    RichText::new(format!("1 sd = {:.2}%", sigma * 100.0))
+                        .color(DIM)
+                        .small(),
+                );
+            });
+
+            egui::Grid::new("posplan")
+                .num_columns(4)
+                .spacing([12.0, 2.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("cost").color(DIM));
+                    ui.label(RichText::new(format!("{cost:.4}")).monospace());
+                    ui.label(RichText::new(format!("{:.2} out", p.outlay)).monospace());
+                    ui.label(
+                        RichText::new(format!("{:.4} sh", p.shares))
+                            .color(DIM)
+                            .small(),
+                    );
+                    ui.end_row();
+
+                    ui.label(RichText::new("sell now").color(DIM));
+                    ui.label(RichText::new(format!("{bid:.4}")).monospace());
+                    ui.label(
+                        RichText::new(format!("{:+.2} EUR", p.net_now))
+                            .color(if p.in_profit() { GREEN } else { RED })
+                            .monospace()
+                            .strong(),
+                    );
+                    ui.label(
+                        RichText::new(format!("{:+.2}% net", p.net_now_pct * 100.0))
+                            .color(if p.in_profit() { GREEN } else { RED })
+                            .monospace(),
+                    );
+                    ui.end_row();
+
+                    ui.label(RichText::new("break even").color(DIM));
+                    ui.label(
+                        RichText::new(format!("{:.4}", p.break_even))
+                            .monospace()
+                            .strong(),
+                    );
+                    ui.label(
+                        RichText::new(if p.to_break_even > 0.0 {
+                            format!("{:+.2}% away", p.to_break_even * 100.0)
+                        } else {
+                            "passed".into()
+                        })
+                        .color(if p.to_break_even > 0.0 { AMBER } else { GREEN })
+                        .monospace(),
+                    );
+                    ui.label(RichText::new("bid must reach this").color(DIM).small());
+                    ui.end_row();
+
+                    ui.label(RichText::new("stop").color(DIM));
+                    ui.label(RichText::new(format!("{:.4}", p.stop)).monospace());
+                    ui.label(
+                        RichText::new(format!("{:.2} EUR", -p.risk_from_here))
+                            .color(RED)
+                            .monospace(),
+                    );
+                    ui.label(
+                        RichText::new(format!("{:.1}% of account", p.risk_of_account * 100.0))
+                            .color(if p.risk_of_account > 0.02 { RED } else { DIM })
+                            .monospace(),
+                    )
+                    .on_hover_text("what a stop costs compared with selling now");
+                    ui.end_row();
+
+                    ui.label(RichText::new("target").color(DIM));
+                    ui.label(RichText::new(format!("{:.4}", p.target)).monospace());
+                    ui.label(
+                        RichText::new(format!("{:+.2} EUR", p.reward_from_here))
+                            .color(GREEN)
+                            .monospace(),
+                    );
+                    ui.label(RichText::new("from here").color(DIM).small());
+                    ui.end_row();
+                });
+        });
     }
 
     fn orders(&mut self, ui: &mut egui::Ui) {
@@ -2078,15 +2215,14 @@ impl App {
             0.0
         };
         let half_spread = q.spread_bps().unwrap_or(0.0) / 20_000.0;
-        let Some(p) = TradePlan::build(
-            entry,
-            shares,
+        let ctx = PlanContext {
             sigma,
-            self.plan_stop_sigmas,
-            self.plan_target_sigmas,
             half_spread,
+            stop_sigmas: self.plan_stop_sigmas,
+            target_sigmas: self.plan_target_sigmas,
             account,
-        ) else {
+        };
+        let Some(p) = TradePlan::build(entry, shares, &ctx) else {
             return;
         };
 

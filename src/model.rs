@@ -1281,6 +1281,19 @@ pub fn fee_for(notional: f64) -> f64 {
     }
 }
 
+/// Everything a plan needs that is not the position itself: how the instrument
+/// behaves, what the exit gives up, and how far out the levels sit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlanContext {
+    /// Daily standard deviation, as a fraction.
+    pub sigma: f64,
+    /// Given up crossing to the bid on exit, as a fraction.
+    pub half_spread: f64,
+    pub stop_sigmas: f64,
+    pub target_sigmas: f64,
+    pub account: f64,
+}
+
 /// What a position would risk and stand to make, before committing to it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TradePlan {
@@ -1305,15 +1318,9 @@ impl TradePlan {
     /// `sigma` is the instrument's daily standard deviation as a fraction, and
     /// the two multiples set how far the stop and target sit from entry.
     /// `half_spread` is what the exit gives up crossing to the bid.
-    pub fn build(
-        entry: f64,
-        shares: f64,
-        sigma: f64,
-        stop_sigmas: f64,
-        target_sigmas: f64,
-        half_spread: f64,
-        account: f64,
-    ) -> Option<TradePlan> {
+    pub fn build(entry: f64, shares: f64, c: &PlanContext) -> Option<TradePlan> {
+        let (sigma, half_spread, account) = (c.sigma, c.half_spread, c.account);
+        let (stop_sigmas, target_sigmas) = (c.stop_sigmas, c.target_sigmas);
         if entry <= 0.0 || shares <= 0.0 || sigma <= 0.0 {
             return None;
         }
@@ -1368,5 +1375,94 @@ impl TradePlan {
     pub fn near_fee_threshold(&self) -> bool {
         let d = (self.notional - FREE_TRADE_THRESHOLD).abs();
         d < FREE_TRADE_THRESHOLD * 0.2
+    }
+}
+
+/// The same questions as `TradePlan`, asked of a position you already hold.
+///
+/// The difference matters: the entry fee is spent, the cost basis is fixed, and
+/// the useful measure of risk is what a stop would cost you *from here* rather
+/// than what the whole position could lose.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PositionPlan {
+    pub shares: f64,
+    pub cost: f64,
+    /// What the position cost in total, including the fee paid on entry.
+    pub outlay: f64,
+    /// What selling into the bid right now would leave, net of the exit fee.
+    pub net_now: f64,
+    pub net_now_pct: f64,
+    /// Price at which selling returns the whole outlay.
+    pub break_even: f64,
+    /// How far the market must still move to reach it, as a fraction.
+    pub to_break_even: f64,
+    pub stop: f64,
+    pub target: f64,
+    /// What a stop would cost compared with selling now.
+    pub risk_from_here: f64,
+    pub risk_of_account: f64,
+    pub reward_from_here: f64,
+}
+
+impl PositionPlan {
+    pub fn build(shares: f64, cost: f64, bid: f64, c: &PlanContext) -> Option<PositionPlan> {
+        let (sigma, half_spread, account) = (c.sigma, c.half_spread, c.account);
+        let (stop_sigmas, target_sigmas) = (c.stop_sigmas, c.target_sigmas);
+        if shares <= 0.0 || cost <= 0.0 || bid <= 0.0 || sigma <= 0.0 {
+            return None;
+        }
+        let basis = shares * cost;
+        let outlay = basis + fee_for(basis);
+
+        // Everything is measured at the bid, because that is where a sale lands.
+        let proceeds_at_bid = |b: f64| {
+            let gross = shares * b;
+            gross - fee_for(gross)
+        };
+        let net_now = proceeds_at_bid(bid) - outlay;
+
+        // Solve for the bid that returns the outlay, trying the free case first
+        // because the fee is a step.
+        let be_free = outlay / shares;
+        let be_charged = (outlay + FLAT_FEE) / shares;
+        let break_even = if be_free * shares >= FREE_TRADE_THRESHOLD {
+            be_free
+        } else {
+            be_charged
+        };
+
+        // Stop and target trail the current price, not the entry: what is at
+        // risk is what the position is worth now.
+        let mid = bid / (1.0 - half_spread).max(1e-9);
+        let stop = (mid * (1.0 - stop_sigmas * sigma)).max(0.0);
+        let target = mid * (1.0 + target_sigmas * sigma);
+
+        let at_stop = proceeds_at_bid(stop * (1.0 - half_spread)) - outlay;
+        let at_target = proceeds_at_bid(target * (1.0 - half_spread)) - outlay;
+
+        let risk_from_here = net_now - at_stop;
+        Some(PositionPlan {
+            shares,
+            cost,
+            outlay,
+            net_now,
+            net_now_pct: net_now / outlay,
+            break_even,
+            to_break_even: break_even / bid - 1.0,
+            stop,
+            target,
+            risk_from_here,
+            risk_of_account: if account > 0.0 {
+                risk_from_here / account
+            } else {
+                0.0
+            },
+            reward_from_here: at_target - net_now,
+        })
+    }
+
+    /// True once selling would return more than the position cost.
+    pub fn in_profit(&self) -> bool {
+        self.net_now > 0.0
     }
 }

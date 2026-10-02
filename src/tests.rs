@@ -1650,10 +1650,21 @@ fn fee_is_a_step_not_a_rate() {
 /// of reading a paper gain as a real one.
 #[test]
 fn trade_plan_nets_out_costs_and_sizes_risk() {
-    use crate::model::TradePlan;
+    use crate::model::{PlanContext, TradePlan};
 
     // A small position: fee charged on the way in and out.
-    let p = TradePlan::build(10.0, 5.0, 0.04, 1.0, 2.0, 0.0175, 500.0).expect("plan");
+    let p = TradePlan::build(
+        10.0,
+        5.0,
+        &PlanContext {
+            sigma: 0.04,
+            stop_sigmas: 1.0,
+            target_sigmas: 2.0,
+            half_spread: 0.0175,
+            account: 500.0,
+        },
+    )
+    .expect("plan");
     assert!(close(p.notional, 50.0));
     assert!(close(p.fee_in, 0.99));
     assert!(close(p.stop, 9.6), "1 sigma below 10 at 4% vol");
@@ -1680,10 +1691,32 @@ fn trade_plan_nets_out_costs_and_sizes_risk() {
 /// show size and fee together.
 #[test]
 fn larger_positions_break_even_sooner() {
-    use crate::model::TradePlan;
+    use crate::model::{PlanContext, TradePlan};
 
-    let small = TradePlan::build(10.0, 5.0, 0.04, 1.0, 2.0, 0.0175, 5000.0).unwrap();
-    let large = TradePlan::build(10.0, 50.0, 0.04, 1.0, 2.0, 0.0175, 5000.0).unwrap();
+    let small = TradePlan::build(
+        10.0,
+        5.0,
+        &PlanContext {
+            sigma: 0.04,
+            stop_sigmas: 1.0,
+            target_sigmas: 2.0,
+            half_spread: 0.0175,
+            account: 5000.0,
+        },
+    )
+    .unwrap();
+    let large = TradePlan::build(
+        10.0,
+        50.0,
+        &PlanContext {
+            sigma: 0.04,
+            stop_sigmas: 1.0,
+            target_sigmas: 2.0,
+            half_spread: 0.0175,
+            account: 5000.0,
+        },
+    )
+    .unwrap();
 
     assert!(small.notional < 250.0 && large.notional >= 250.0);
     assert!(close(large.fee_in, 0.0), "large order is free");
@@ -1699,19 +1732,65 @@ fn larger_positions_break_even_sooner() {
     // A position straddling the boundary is flagged, since a few shares either
     // way changes the fee.
     assert!(
-        TradePlan::build(10.0, 26.0, 0.04, 1.0, 2.0, 0.0175, 5000.0)
-            .unwrap()
-            .near_fee_threshold()
+        TradePlan::build(
+            10.0,
+            26.0,
+            &PlanContext {
+                sigma: 0.04,
+                stop_sigmas: 1.0,
+                target_sigmas: 2.0,
+                half_spread: 0.0175,
+                account: 5000.0
+            }
+        )
+        .unwrap()
+        .near_fee_threshold()
     );
     assert!(
-        !TradePlan::build(10.0, 200.0, 0.04, 1.0, 2.0, 0.0175, 5000.0)
-            .unwrap()
-            .near_fee_threshold()
+        !TradePlan::build(
+            10.0,
+            200.0,
+            &PlanContext {
+                sigma: 0.04,
+                stop_sigmas: 1.0,
+                target_sigmas: 2.0,
+                half_spread: 0.0175,
+                account: 5000.0
+            }
+        )
+        .unwrap()
+        .near_fee_threshold()
     );
 
     // Nonsense inputs yield no plan rather than a misleading one.
-    assert!(TradePlan::build(0.0, 10.0, 0.04, 1.0, 2.0, 0.0175, 5000.0).is_none());
-    assert!(TradePlan::build(10.0, 10.0, 0.0, 1.0, 2.0, 0.0175, 5000.0).is_none());
+    assert!(
+        TradePlan::build(
+            0.0,
+            10.0,
+            &PlanContext {
+                sigma: 0.04,
+                stop_sigmas: 1.0,
+                target_sigmas: 2.0,
+                half_spread: 0.0175,
+                account: 5000.0
+            }
+        )
+        .is_none()
+    );
+    assert!(
+        TradePlan::build(
+            10.0,
+            10.0,
+            &PlanContext {
+                sigma: 0.0,
+                stop_sigmas: 1.0,
+                target_sigmas: 2.0,
+                half_spread: 0.0175,
+                account: 5000.0
+            }
+        )
+        .is_none()
+    );
 }
 
 /// A split shows up as an enormous single step. Left in, it dominates the
@@ -1758,4 +1837,128 @@ fn corporate_actions_are_excluded_from_volatility() {
     let mut short = vec![50.0; 25];
     short.extend([150.0, 151.0, 150.5]);
     assert!(SeriesStats::from_chart(&mk(short)).is_none());
+}
+
+/// For a position already held, the entry fee is spent and the question is what
+/// a sale returns now, not what the whole position could lose.
+#[test]
+fn position_plan_measures_from_the_bid_and_the_outlay() {
+    use crate::model::{PlanContext, PositionPlan};
+
+    // 2 shares bought at 165.12, now bid 170.68, 44 bps spread. Above the free
+    // threshold, so neither leg pays a fee.
+    let p = PositionPlan::build(
+        2.0,
+        165.12,
+        170.68,
+        &PlanContext {
+            half_spread: 0.0022,
+            sigma: 0.071,
+            stop_sigmas: 1.0,
+            target_sigmas: 2.0,
+            account: 547.92,
+        },
+    )
+    .expect("plan");
+
+    assert!(
+        close(p.outlay, 330.24),
+        "330.24 outlay, no entry fee above 250"
+    );
+    assert!(p.in_profit());
+    // Selling into the bid returns the bid, not the mid.
+    assert!(close(p.net_now, 2.0 * 170.68 - 330.24));
+    assert!(p.net_now_pct > 0.0);
+
+    // Already past break even, so it sits below the current bid.
+    assert!(p.break_even < 170.68);
+    assert!(p.to_break_even < 0.0, "no further rise needed");
+
+    // Risk is what a stop costs versus selling now, and is strictly positive
+    // while the stop is below the market.
+    assert!(p.stop < 170.68);
+    assert!(p.risk_from_here > 0.0);
+    assert!(p.reward_from_here > 0.0);
+    assert!((p.risk_of_account - p.risk_from_here / 547.92).abs() < 1e-9);
+}
+
+/// A small, losing position has to clear both the spread and a fee at each end
+/// before a sale is worth making.
+#[test]
+fn position_plan_shows_the_hurdle_on_a_small_loser() {
+    use crate::model::{PlanContext, PositionPlan};
+
+    // 20 Liberty Gold at 1.312, now bid 1.262, a 464 bps spread.
+    let p = PositionPlan::build(
+        20.0,
+        1.312,
+        1.262,
+        &PlanContext {
+            half_spread: 0.0232,
+            sigma: 0.04,
+            stop_sigmas: 1.0,
+            target_sigmas: 2.0,
+            account: 547.92,
+        },
+    )
+    .expect("plan");
+
+    assert!(
+        close(p.outlay, 20.0 * 1.312 + 0.99),
+        "small order pays the fee"
+    );
+    assert!(!p.in_profit());
+    assert!(p.net_now < 0.0);
+
+    // Break even is above the current bid, and by more than the raw loss,
+    // because both fees sit on top.
+    assert!(p.break_even > 1.312, "must clear the entry fee too");
+    assert!(p.to_break_even > 0.0);
+
+    // Nonsense inputs produce nothing rather than a misleading plan.
+    assert!(
+        PositionPlan::build(
+            0.0,
+            1.3,
+            1.26,
+            &PlanContext {
+                half_spread: 0.02,
+                sigma: 0.04,
+                stop_sigmas: 1.0,
+                target_sigmas: 2.0,
+                account: 500.0
+            }
+        )
+        .is_none()
+    );
+    assert!(
+        PositionPlan::build(
+            20.0,
+            1.3,
+            0.0,
+            &PlanContext {
+                half_spread: 0.02,
+                sigma: 0.04,
+                stop_sigmas: 1.0,
+                target_sigmas: 2.0,
+                account: 500.0
+            }
+        )
+        .is_none()
+    );
+    assert!(
+        PositionPlan::build(
+            20.0,
+            1.3,
+            1.26,
+            &PlanContext {
+                half_spread: 0.02,
+                sigma: 0.0,
+                stop_sigmas: 1.0,
+                target_sigmas: 2.0,
+                account: 500.0
+            }
+        )
+        .is_none()
+    );
 }

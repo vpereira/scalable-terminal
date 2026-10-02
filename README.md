@@ -239,6 +239,20 @@ Fees are a step, not a rate. Every observed order up to 149.65 EUR paid a flat 0
 
 Volatility ignores corporate actions. A split appears as an enormous single step, and left in it dominates everything: Moderna's August action put its measured volatility at 23% a day, which would have placed a one deviation stop 23% below entry. Only the stretch after the most recent such break is measured, and the point count shown tells you how much that left.
 
+Selecting an instrument you hold shows the same questions asked of the open position, where the entry fee is already spent and the cost basis is fixed:
+
+```
+Position Village Farms International      1 sd = 2.86%
+
+cost          2.7317   82.94 out    30.0000 sh
+sell now      2.5300   -8.03 EUR    -9.68% net
+break even    2.7977  +10.58% away  bid must reach this
+stop          2.4915   -2.17 EUR    0.3% of account
+target        2.7119   +4.35 EUR    from here
+```
+
+Risk here is what a stop costs compared with selling now, not what the whole position could lose, because the money is already committed. Break even is the bid, since that is where a sale lands.
+
 ## Orders
 
 Market, limit and stop. Venue overridable. No bracket or OCO, because the CLI has neither.
