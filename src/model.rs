@@ -1206,8 +1206,26 @@ impl SeriesStats {
             return None;
         }
 
-        let rets: Vec<f64> = c
-            .points
+        // A split or similar shows up as an enormous single step and would
+        // otherwise dominate the estimate: Moderna's 19 August corporate action
+        // put its measured volatility at 23% a day. Use only the stretch after
+        // the most recent such break.
+        const BREAK: f64 = 0.5;
+        let mut start = 0usize;
+        for i in 1..c.points.len() {
+            if c.points[i - 1].mid > 0.0 {
+                let step = c.points[i].mid / c.points[i - 1].mid - 1.0;
+                if step.abs() > BREAK {
+                    start = i;
+                }
+            }
+        }
+        let usable = &c.points[start..];
+        if usable.len() < Self::MIN_POINTS {
+            return None;
+        }
+
+        let rets: Vec<f64> = usable
             .windows(2)
             .filter(|w| w[0].mid > 0.0)
             .map(|w| w[1].mid / w[0].mid - 1.0)
@@ -1230,9 +1248,9 @@ impl SeriesStats {
             daily_move: mean_abs / scale,
             daily_vol,
             annual_vol: daily_vol * 252.0_f64.sqrt(),
-            points: c.points.len(),
+            points: usable.len(),
             interval_days: interval,
-            span_days: c.span_days(),
+            span_days: (usable.last()?.t - usable.first()?.t) / 86_400.0,
         })
     }
 
@@ -1243,5 +1261,112 @@ impl SeriesStats {
     /// be right for two days before it breaks even.
     pub fn spread_in_days(&self, spread_fraction: f64) -> Option<f64> {
         (self.daily_move > 0.0 && spread_fraction > 0.0).then(|| spread_fraction / self.daily_move)
+    }
+}
+
+/// Order value at or above which the broker charged no fee.
+///
+/// Observed rather than documented: every settled trade up to 149.65 EUR paid
+/// 0.99, and one at 330.24 paid nothing, all on the same venue. The true
+/// threshold lies somewhere between those two and 250 is the published PRIME
+/// figure, so that is the assumption. Plans near the boundary say so.
+pub const FREE_TRADE_THRESHOLD: f64 = 250.0;
+pub const FLAT_FEE: f64 = 0.99;
+
+pub fn fee_for(notional: f64) -> f64 {
+    if notional >= FREE_TRADE_THRESHOLD {
+        0.0
+    } else {
+        FLAT_FEE
+    }
+}
+
+/// What a position would risk and stand to make, before committing to it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TradePlan {
+    pub entry: f64,
+    pub shares: f64,
+    pub notional: f64,
+    pub fee_in: f64,
+    pub fee_out: f64,
+    /// Price the market must reach for an exit to return the whole outlay.
+    pub break_even: f64,
+    pub stop: f64,
+    pub target: f64,
+    /// Currency amounts, net of both fees and the spread crossed on exit.
+    pub risk: f64,
+    pub reward: f64,
+    /// Risk as a share of the whole account.
+    pub risk_of_account: f64,
+    pub reward_ratio: Option<f64>,
+}
+
+impl TradePlan {
+    /// `sigma` is the instrument's daily standard deviation as a fraction, and
+    /// the two multiples set how far the stop and target sit from entry.
+    /// `half_spread` is what the exit gives up crossing to the bid.
+    pub fn build(
+        entry: f64,
+        shares: f64,
+        sigma: f64,
+        stop_sigmas: f64,
+        target_sigmas: f64,
+        half_spread: f64,
+        account: f64,
+    ) -> Option<TradePlan> {
+        if entry <= 0.0 || shares <= 0.0 || sigma <= 0.0 {
+            return None;
+        }
+        let notional = shares * entry;
+        let fee_in = fee_for(notional);
+        let stop = (entry * (1.0 - stop_sigmas * sigma)).max(0.0);
+        let target = entry * (1.0 + target_sigmas * sigma);
+
+        // Exits are sold into the bid, and the fee depends on that exit value.
+        let proceeds = |px: f64| {
+            let gross = shares * px * (1.0 - half_spread);
+            gross - fee_for(gross)
+        };
+        let outlay = notional + fee_in;
+
+        // Break even solves proceeds(p) == outlay. The fee is a step function,
+        // so try the free case first and fall back to the charged one.
+        let be_free = outlay / shares / (1.0 - half_spread);
+        let be_charged = (outlay + FLAT_FEE) / shares / (1.0 - half_spread);
+        let break_even = if be_free * shares * (1.0 - half_spread) >= FREE_TRADE_THRESHOLD {
+            be_free
+        } else {
+            be_charged
+        };
+
+        let risk = outlay - proceeds(stop);
+        let reward = proceeds(target) - outlay;
+
+        Some(TradePlan {
+            entry,
+            shares,
+            notional,
+            fee_in,
+            fee_out: fee_for(shares * target * (1.0 - half_spread)),
+            break_even,
+            stop,
+            target,
+            risk,
+            reward,
+            risk_of_account: if account > 0.0 { risk / account } else { 0.0 },
+            reward_ratio: (risk > 0.0).then(|| reward / risk),
+        })
+    }
+
+    /// How far price must travel from entry to break even, as a fraction.
+    pub fn break_even_move(&self) -> f64 {
+        self.break_even / self.entry - 1.0
+    }
+
+    /// True when a small change in size would flip the fee, which is worth
+    /// saying out loud because it can be worth more than the trade's edge.
+    pub fn near_fee_threshold(&self) -> bool {
+        let d = (self.notional - FREE_TRADE_THRESHOLD).abs();
+        d < FREE_TRADE_THRESHOLD * 0.2
     }
 }

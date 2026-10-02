@@ -1,5 +1,5 @@
 use crate::model::*;
-use crate::model::{ChartStyle, Window};
+use crate::model::{ChartStyle, TradePlan, Window};
 use crate::shortcuts::{self, Act};
 use crate::worker::{self, Cmd, Handle, TIMEFRAMES, TradeIntent};
 use crate::workspace::{ListId, Workspace};
@@ -77,6 +77,8 @@ pub struct App {
     tag_filter: Option<String>,
     tag_input: String,
     alert_price: f64,
+    plan_stop_sigmas: f64,
+    plan_target_sigmas: f64,
     prefs_saved: Option<std::time::Instant>,
     /// What the plot last drew. egui_plot keeps pan and zoom per plot id, so
     /// switching instruments must reset the view or the previous instrument's
@@ -160,6 +162,8 @@ impl App {
             tag_filter: None,
             tag_input: String::new(),
             alert_price: 0.0,
+            plan_stop_sigmas: 1.0,
+            plan_target_sigmas: 2.0,
             prefs_saved: None,
             plotted: None,
             last_poll_set: Vec::new(),
@@ -2010,6 +2014,8 @@ impl App {
                 );
             });
 
+            self.plan(ui, &isin, q.as_ref());
+
             let pending = { self.io.state.lock().unwrap().preview_pending };
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -2042,6 +2048,151 @@ impl App {
                 ui.label(RichText::new(e.clone()).color(RED));
             }
         });
+    }
+
+    /// What the order would risk, before committing to it.
+    ///
+    /// Every figure is net of both fees and the spread given up on exit, so it
+    /// answers what you actually keep rather than what the paper gain says.
+    fn plan(&mut self, ui: &mut egui::Ui, isin: &str, q: Option<&Quote>) {
+        let (sigma, account) = {
+            let s = self.io.state.lock().unwrap();
+            (
+                s.stats.get(isin).map(|st| st.daily_vol),
+                s.account.total.unwrap_or(0.0),
+            )
+        };
+        let (Some(sigma), Some(q)) = (sigma, q) else {
+            return;
+        };
+        // Buying lifts the ask; selling is an exit and has no plan to make.
+        let Some(entry) = q.ask.or(q.mid) else { return };
+        if self.side != Side::Buy {
+            return;
+        }
+        let shares = if self.size_by_shares {
+            self.shares
+        } else if entry > 0.0 {
+            self.amount / entry
+        } else {
+            0.0
+        };
+        let half_spread = q.spread_bps().unwrap_or(0.0) / 20_000.0;
+        let Some(p) = TradePlan::build(
+            entry,
+            shares,
+            sigma,
+            self.plan_stop_sigmas,
+            self.plan_target_sigmas,
+            half_spread,
+            account,
+        ) else {
+            return;
+        };
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Plan").strong().color(BLUE));
+            ui.label(RichText::new("stop").color(DIM).small());
+            ui.add(
+                egui::DragValue::new(&mut self.plan_stop_sigmas)
+                    .speed(0.1)
+                    .range(0.2..=5.0)
+                    .suffix(" sd"),
+            );
+            ui.label(RichText::new("target").color(DIM).small());
+            ui.add(
+                egui::DragValue::new(&mut self.plan_target_sigmas)
+                    .speed(0.1)
+                    .range(0.2..=10.0)
+                    .suffix(" sd"),
+            );
+            ui.label(
+                RichText::new(format!("1 sd = {:.2}%", sigma * 100.0))
+                    .color(DIM)
+                    .small(),
+            );
+        });
+
+        egui::Grid::new("plan")
+            .num_columns(4)
+            .spacing([12.0, 2.0])
+            .show(ui, |ui| {
+                ui.label(RichText::new("size").color(DIM));
+                ui.label(RichText::new(format!("{:.4} sh", p.shares)).monospace());
+                ui.label(RichText::new(format!("{:.2} EUR", p.notional)).monospace());
+                ui.label(
+                    RichText::new(if p.fee_in > 0.0 {
+                        format!("fee {:.2}", p.fee_in)
+                    } else {
+                        "no fee".into()
+                    })
+                    .color(if p.fee_in > 0.0 { AMBER } else { GREEN })
+                    .small(),
+                );
+                ui.end_row();
+
+                ui.label(RichText::new("break even").color(DIM));
+                ui.label(
+                    RichText::new(format!("{:.4}", p.break_even))
+                        .monospace()
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new(format!("{:+.2}%", p.break_even_move() * 100.0))
+                        .color(AMBER)
+                        .monospace(),
+                );
+                ui.label(RichText::new("must rise this far first").color(DIM).small());
+                ui.end_row();
+
+                ui.label(RichText::new("stop").color(DIM));
+                ui.label(RichText::new(format!("{:.4}", p.stop)).monospace());
+                ui.label(
+                    RichText::new(format!("{:.2} EUR", -p.risk))
+                        .color(RED)
+                        .monospace(),
+                );
+                ui.label(
+                    RichText::new(format!("{:.1}% of account", p.risk_of_account * 100.0))
+                        .color(if p.risk_of_account > 0.02 { RED } else { DIM })
+                        .monospace(),
+                );
+                ui.end_row();
+
+                ui.label(RichText::new("target").color(DIM));
+                ui.label(RichText::new(format!("{:.4}", p.target)).monospace());
+                ui.label(
+                    RichText::new(format!("{:+.2} EUR", p.reward))
+                        .color(if p.reward > 0.0 { GREEN } else { RED })
+                        .monospace(),
+                );
+                if let Some(rr) = p.reward_ratio {
+                    ui.label(
+                        RichText::new(format!("{rr:.2} : 1"))
+                            .color(if rr >= 2.0 {
+                                GREEN
+                            } else if rr >= 1.0 {
+                                AMBER
+                            } else {
+                                RED
+                            })
+                            .monospace(),
+                    );
+                }
+                ui.end_row();
+            });
+
+        if p.near_fee_threshold() && p.fee_in > 0.0 {
+            ui.label(
+                RichText::new(format!(
+                    "{:.0} EUR more and the fee disappears",
+                    crate::model::FREE_TRADE_THRESHOLD - p.notional
+                ))
+                .color(AMBER)
+                .small(),
+            );
+        }
     }
 
     fn central(&mut self, ui: &mut egui::Ui) {

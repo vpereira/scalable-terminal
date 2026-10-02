@@ -1627,3 +1627,135 @@ fn stats_come_from_a_series_that_can_support_them() {
     // Observed live on a private equity fund in the watchlist.
     assert!(SeriesStats::from_chart(&mk(3, 31.0)).is_none());
 }
+
+/// Fees are a step, not a rate: every observed trade up to 149.65 EUR paid a
+/// flat 0.99 and one at 330.24 paid nothing. Modelling it as a percentage would
+/// misprice every plan.
+#[test]
+fn fee_is_a_step_not_a_rate() {
+    use crate::model::{FLAT_FEE, FREE_TRADE_THRESHOLD, fee_for};
+
+    // The sizes actually seen on the account.
+    for small in [13.86, 21.19, 56.60, 73.40, 149.65] {
+        assert_eq!(fee_for(small), FLAT_FEE, "{small} should be charged");
+    }
+    assert_eq!(fee_for(330.24), 0.0, "observed free");
+
+    // Exactly at the boundary is free, a cent under is not.
+    assert_eq!(fee_for(FREE_TRADE_THRESHOLD), 0.0);
+    assert_eq!(fee_for(FREE_TRADE_THRESHOLD - 0.01), FLAT_FEE);
+}
+
+/// The plan has to net out both fees and the spread, or it repeats the mistake
+/// of reading a paper gain as a real one.
+#[test]
+fn trade_plan_nets_out_costs_and_sizes_risk() {
+    use crate::model::TradePlan;
+
+    // A small position: fee charged on the way in and out.
+    let p = TradePlan::build(10.0, 5.0, 0.04, 1.0, 2.0, 0.0175, 500.0).expect("plan");
+    assert!(close(p.notional, 50.0));
+    assert!(close(p.fee_in, 0.99));
+    assert!(close(p.stop, 9.6), "1 sigma below 10 at 4% vol");
+    assert!(close(p.target, 10.8), "2 sigma above");
+
+    // Break even must exceed entry, because both fees and the spread are real.
+    assert!(p.break_even > p.entry);
+    assert!(p.break_even_move() > 0.0);
+    // Two fees plus the spread on a 50 EUR position is several percent.
+    assert!(p.break_even_move() > 0.05, "got {}", p.break_even_move());
+
+    // Risk is the whole outlay minus what the stop would return.
+    assert!(p.risk > 0.0);
+    assert!((p.risk_of_account - p.risk / 500.0).abs() < 1e-9);
+    assert!(p.risk_of_account < 1.0);
+
+    // A 2:1 sigma spread does not give 2:1 in money once costs are paid.
+    let rr = p.reward_ratio.expect("ratio");
+    assert!(rr < 2.0, "costs must erode the ratio, got {rr}");
+    assert!(rr > 0.0);
+}
+
+/// Above the free threshold the economics change, which is the whole reason to
+/// show size and fee together.
+#[test]
+fn larger_positions_break_even_sooner() {
+    use crate::model::TradePlan;
+
+    let small = TradePlan::build(10.0, 5.0, 0.04, 1.0, 2.0, 0.0175, 5000.0).unwrap();
+    let large = TradePlan::build(10.0, 50.0, 0.04, 1.0, 2.0, 0.0175, 5000.0).unwrap();
+
+    assert!(small.notional < 250.0 && large.notional >= 250.0);
+    assert!(close(large.fee_in, 0.0), "large order is free");
+
+    // The same move is worth more when no fee is taken from either end.
+    assert!(large.break_even_move() < small.break_even_move());
+    assert!(large.reward_ratio.unwrap() > small.reward_ratio.unwrap());
+
+    // Risking more money is still risking more money.
+    assert!(large.risk > small.risk);
+    assert!(large.risk_of_account > small.risk_of_account);
+
+    // A position straddling the boundary is flagged, since a few shares either
+    // way changes the fee.
+    assert!(
+        TradePlan::build(10.0, 26.0, 0.04, 1.0, 2.0, 0.0175, 5000.0)
+            .unwrap()
+            .near_fee_threshold()
+    );
+    assert!(
+        !TradePlan::build(10.0, 200.0, 0.04, 1.0, 2.0, 0.0175, 5000.0)
+            .unwrap()
+            .near_fee_threshold()
+    );
+
+    // Nonsense inputs yield no plan rather than a misleading one.
+    assert!(TradePlan::build(0.0, 10.0, 0.04, 1.0, 2.0, 0.0175, 5000.0).is_none());
+    assert!(TradePlan::build(10.0, 10.0, 0.0, 1.0, 2.0, 0.0175, 5000.0).is_none());
+}
+
+/// A split shows up as an enormous single step. Left in, it dominates the
+/// estimate: Moderna's 19 August action put measured volatility at 23% a day
+/// and would have set a stop 23% below entry in the plan panel.
+#[test]
+fn corporate_actions_are_excluded_from_volatility() {
+    use crate::model::{Chart, ChartPoint, SeriesStats};
+
+    let mk = |prices: Vec<f64>| Chart {
+        points: prices
+            .iter()
+            .enumerate()
+            .map(|(i, m)| ChartPoint {
+                t: i as f64 * 86_400.0,
+                mid: *m,
+                ts: String::new(),
+            })
+            .collect(),
+        ..Default::default()
+    };
+
+    // Quiet series, then a tripling, then the same quiet behaviour.
+    let mut prices: Vec<f64> = (0..30).map(|i| 50.0 + (i % 3) as f64 * 0.5).collect();
+    prices.extend((0..30).map(|i| 150.0 + (i % 3) as f64 * 1.5));
+    let with_break = SeriesStats::from_chart(&mk(prices)).expect("still usable");
+
+    // Only the post break stretch is measured.
+    assert_eq!(with_break.points, 30);
+    // A 200% step would put daily volatility far above anything real.
+    assert!(
+        with_break.daily_vol < 0.10,
+        "volatility {} still polluted by the split",
+        with_break.daily_vol
+    );
+
+    // The same clean stretch measured on its own agrees.
+    let clean =
+        SeriesStats::from_chart(&mk((0..30).map(|i| 150.0 + (i % 3) as f64 * 1.5).collect()))
+            .expect("clean");
+    assert!((with_break.daily_vol - clean.daily_vol).abs() < 1e-9);
+
+    // If too little survives the break, refuse rather than report nonsense.
+    let mut short = vec![50.0; 25];
+    short.extend([150.0, 151.0, 150.5]);
+    assert!(SeriesStats::from_chart(&mk(short)).is_none());
+}

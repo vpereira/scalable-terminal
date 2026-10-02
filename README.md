@@ -220,6 +220,25 @@ Coverage is uneven. Large names carry a summary, smaller ones frequently return 
 
 Note this payload sits directly under `data` rather than `data.result`, the same quirk as `broker chart`.
 
+## Plan
+
+The ticket shows what a buy would risk before you commit to it, with every figure net of fees and the spread you give up on exit.
+
+```
+Plan   stop 1.0 sd   target 2.0 sd    1 sd = 7.10%
+
+size          2.9165 sh   500.00 EUR   no fee
+break even      171.82      +0.22%     must rise this far first
+stop            159.26     -40.70 EUR   8.2% of account
+target          195.77    +107.30 EUR   2.63 : 1
+```
+
+Stop and target are set in standard deviations of the instrument's own daily movement, so they adapt rather than applying a flat percentage to something that moves 0.6% a day and something that moves 4%.
+
+Fees are a step, not a rate. Every observed order up to 149.65 EUR paid a flat 0.99 and one at 330.24 paid nothing, all on the same venue, so the threshold sits between them and 250 is assumed. The plan prices the fee accordingly and says when a slightly larger order would cross into free territory, because that is sometimes worth more than the trade's edge.
+
+Volatility ignores corporate actions. A split appears as an enormous single step, and left in it dominates everything: Moderna's August action put its measured volatility at 23% a day, which would have placed a one deviation stop 23% below entry. Only the stretch after the most recent such break is measured, and the point count shown tells you how much that left.
+
 ## Orders
 
 Market, limit and stop. Venue overridable. No bracket or OCO, because the CLI has neither.
