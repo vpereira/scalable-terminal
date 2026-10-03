@@ -1113,6 +1113,13 @@ impl App {
             // without this the trailing controls are pushed out of reach. Name
             // and tags clip rather than competing for leftover width, which
             // kept the fixed columns from being predictable.
+            let action_w = match self.workspace.active {
+                ListId::Local(_) => 78.0,
+                ListId::Broker => 26.0,
+                ListId::Positions => 0.0,
+            };
+            // Sized to fit the panel rather than to scroll: the table measures
+            // the viewport, not its content, so anything wider simply overlaps.
             egui::ScrollArea::horizontal()
                 .id_salt("watchlist_h")
                 .show(ui, |ui| {
@@ -1122,14 +1129,16 @@ impl App {
                 .column(Column::exact(12.0))
                 // Actions sit at the left because the row is wider than the
                 // panel: at the far end they scroll out of reach, and removing
-                // an instrument is not something to go hunting for.
-                .column(Column::exact(86.0))
-                .column(Column::exact(118.0))
-                .column(Column::initial(180.0).at_least(80.0).clip(true))
-                .columns(Column::exact(74.0), 3)
-                .columns(Column::exact(62.0), 6)
-                .column(Column::exact(60.0))
-                .column(Column::initial(110.0).at_least(60.0).clip(true))
+                // an instrument is not something to go hunting for. Width
+                // follows what the active list actually shows, since only a
+                // custom list has anything to reorder.
+                .column(Column::exact(action_w))
+                .column(Column::exact(112.0))
+                .column(Column::initial(140.0).at_least(70.0).clip(true))
+                .columns(Column::exact(66.0), 3)
+                .columns(Column::exact(54.0), 6)
+                .columns(Column::exact(52.0), 2)
+                .column(Column::initial(84.0).at_least(50.0).clip(true))
                 .header(20.0, |mut h| {
                     h.col(|_| {});
                     h.col(|_| {});
