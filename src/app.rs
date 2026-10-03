@@ -1109,19 +1109,29 @@ impl App {
                 rows.len()
             );
             let (_, _) = section(ui, &title, None, |ui| {
+            // The row needs about 1100 px and the panel is often narrower, so
+            // without this the trailing controls are pushed out of reach. Name
+            // and tags clip rather than competing for leftover width, which
+            // kept the fixed columns from being predictable.
+            egui::ScrollArea::horizontal()
+                .id_salt("watchlist_h")
+                .show(ui, |ui| {
             TableBuilder::new(ui)
                 .striped(true)
                 .cell_layout(egui::Layout::right_to_left(egui::Align::Center))
                 .column(Column::exact(12.0))
+                // Actions sit at the left because the row is wider than the
+                // panel: at the far end they scroll out of reach, and removing
+                // an instrument is not something to go hunting for.
+                .column(Column::exact(86.0))
                 .column(Column::exact(118.0))
-                .column(Column::remainder().at_least(120.0))
+                .column(Column::initial(180.0).at_least(80.0).clip(true))
                 .columns(Column::exact(74.0), 3)
                 .columns(Column::exact(62.0), 6)
                 .column(Column::exact(60.0))
-                .column(Column::remainder().at_least(80.0))
-                .column(Column::exact(64.0))
-                .column(Column::exact(22.0))
+                .column(Column::initial(110.0).at_least(60.0).clip(true))
                 .header(20.0, |mut h| {
+                    h.col(|_| {});
                     h.col(|_| {});
                     for t in ["ISIN", "Name", "Bid", "Ask", "Mid"] {
                         h.col(|ui| {
@@ -1156,8 +1166,6 @@ impl App {
                             ui.label(RichText::new(t).strong());
                         });
                     }
-                    h.col(|_| {});
-                    h.col(|_| {});
                 })
                 .body(|body| {
                     body.rows(20.0, rows.len(), |mut row| {
@@ -1174,6 +1182,29 @@ impl App {
                                 ui.label(RichText::new("\u{2026}").color(DIM))
                                     .on_hover_text("waiting for the first quote");
                             }
+                        });
+                        row.col(|ui| {
+                            let local = matches!(self.workspace.active, ListId::Local(_));
+                            // Positions is derived, and a holding shown on the
+                            // broker list has no entry there to delete.
+                            let editable = match self.workspace.active {
+                                ListId::Positions => false,
+                                ListId::Broker => !held,
+                                ListId::Local(_) => true,
+                            };
+                            ui.horizontal(|ui| {
+                                if editable && ui.small_button("x").on_hover_text("remove").clicked() {
+                                    remove = Some(q.isin.clone());
+                                }
+                                if local {
+                                    if ui.small_button("\u{2b07}").clicked() {
+                                        reorder = Some((q.isin.clone(), 1));
+                                    }
+                                    if ui.small_button("\u{2b06}").clicked() {
+                                        reorder = Some((q.isin.clone(), -1));
+                                    }
+                                }
+                            });
                         });
                         row.col(|ui| {
                             let t = RichText::new(&q.isin).monospace();
@@ -1267,34 +1298,9 @@ impl App {
                                 }
                             });
                         });
-                        row.col(|ui| {
-                            // Order is the ranking on a custom list, so it is
-                            // worth moving. The broker list has no order to keep.
-                            if matches!(self.workspace.active, ListId::Local(_)) {
-                                ui.horizontal(|ui| {
-                                    if ui.small_button("\u{2b07}").clicked() {
-                                        reorder = Some((q.isin.clone(), 1));
-                                    }
-                                    if ui.small_button("\u{2b06}").clicked() {
-                                        reorder = Some((q.isin.clone(), -1));
-                                    }
-                                });
-                            }
-                        });
-                        row.col(|ui| {
-                            // Positions is derived, and a holding shown on the
-                            // broker list has no entry there to delete.
-                            let editable = match self.workspace.active {
-                                ListId::Positions => false,
-                                ListId::Broker => !held,
-                                ListId::Local(_) => true,
-                            };
-                            if editable && ui.small_button("x").clicked() {
-                                remove = Some(q.isin.clone());
-                            }
-                        });
                     });
                 });
+            });
             });
 
             if let Some(p) = pick {

@@ -123,7 +123,7 @@ Top bar: session, last quote round time and instrument count, poll interval, how
 
 The synced label covers holdings, orders, cash and alerts, which only change when you trade, and is separate from the quote round that runs on its own interval. Pressing Refresh all replaces it with a spinner until the round completes, so the button visibly does something.
 
-Watchlist strip, with a list selector across the top. Columns are bid, ask, mid, intraday change and spread in basis points, colour coded. A marker flags quotes the broker considers stale.
+Watchlist strip, with a list selector across the top. Remove and reorder sit at the left of each row rather than the right, because the row is wider than the panel and anything at the far end scrolls out of reach. The data columns overflow into a horizontal scroll instead. Columns are bid, ask, mid, intraday change and spread in basis points, colour coded. A marker flags quotes the broker considers stale.
 
 Three kinds of list:
 
