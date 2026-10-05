@@ -153,9 +153,11 @@ Village Farms   358 bps / 2.11%  =  1.7 days
 
 The chart header adds typical daily movement and annualised volatility.
 
-Two honesty notes. This is **not** average daily range. Scalable publishes no high or low, only mid ticks, so it is mean absolute close to close change and understates true intraday range, usually by about half. And the figures are only computed when the series is sampled between roughly half a day and five days apart, with at least twenty observations. Intraday ticks extrapolated to a day, or a monthly priced fund that returns three points in three months, produce nothing rather than a number that looks authoritative and is not.
+Limits:
 
-For the same reason there is no 52 week high or low. Deriving it from the 1y series, which samples every two days, missed the real high by 15% on a test instrument, which would misstate position in range by 13 points.
+- Daily movement is the mean absolute close to close change, not daily range. Scalable has no high or low, only mid ticks. Understates intraday range by about half.
+- Computed only when samples are 0.5 to 5 days apart and there are at least 20 of them. Otherwise blank.
+- No 52 week high or low. The 1y series samples every 2 days and missed the real high by 15% in a test.
 
 ## Relative strength
 
