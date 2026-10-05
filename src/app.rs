@@ -27,6 +27,7 @@ enum Tab {
     Chart,
     Derivatives,
     News,
+    History,
     Log,
     Raw,
 }
@@ -100,6 +101,9 @@ pub struct App {
     venue: String,
     accept_unsuitable: bool,
     confirm_typed: String,
+    hist_cash: bool,
+    hist_unfilled: bool,
+    hist_selected_only: bool,
 }
 
 impl App {
@@ -123,6 +127,7 @@ impl App {
                 "chart" => Tab::Chart,
                 "derivatives" => Tab::Derivatives,
                 "news" => Tab::News,
+                "history" => Tab::History,
                 "log" => Tab::Log,
                 "raw" => Tab::Raw,
                 _ => Tab::Portfolio,
@@ -181,6 +186,9 @@ impl App {
             venue: String::new(),
             accept_unsuitable: false,
             confirm_typed: String::new(),
+            hist_cash: true,
+            hist_unfilled: false,
+            hist_selected_only: false,
         }
     }
 
@@ -485,6 +493,7 @@ impl App {
             Act::ViewDerivatives => self.tab = Tab::Derivatives,
             Act::ViewPortfolio => self.tab = Tab::Portfolio,
             Act::ViewLog => self.tab = Tab::Log,
+            Act::ViewHistory => self.tab = Tab::History,
             Act::ViewRaw => self.tab = Tab::Raw,
 
             Act::PrevInstrument => self.step_instrument(-1),
@@ -827,6 +836,7 @@ impl App {
                     }
                     ui.selectable_value(&mut self.tab, Tab::Raw, "Raw");
                     ui.selectable_value(&mut self.tab, Tab::Log, "Log");
+                    ui.selectable_value(&mut self.tab, Tab::History, "History");
                     ui.selectable_value(&mut self.tab, Tab::Portfolio, "Portfolio");
                     ui.selectable_value(&mut self.tab, Tab::Derivatives, "Derivatives");
                     ui.selectable_value(&mut self.tab, Tab::News, "News");
@@ -1381,13 +1391,23 @@ impl App {
     }
 
     fn positions(&mut self, ui: &mut egui::Ui) {
-        let (holdings, quotes, working) = {
+        let (holdings, quotes, working, ledger) = {
             let s = self.io.state.lock().unwrap();
-            (s.holdings.clone(), s.quotes.clone(), s.orders.clone())
+            (
+                s.holdings.clone(),
+                s.quotes.clone(),
+                s.orders.clone(),
+                s.ledger.clone(),
+            )
         };
+        let fees: Vec<(f64, bool)> = holdings.iter().map(|h| ledger.entry_fees(h)).collect();
 
         let total: Option<f64> = {
-            let v: Vec<f64> = holdings.iter().filter_map(|h| h.unrealized()).collect();
+            let v: Vec<f64> = holdings
+                .iter()
+                .zip(&fees)
+                .filter_map(|(h, (f, _))| h.net_unrealized(*f))
+                .collect();
             (!v.is_empty()).then(|| v.iter().sum())
         };
         let title = format!("Positions ({})", holdings.len());
@@ -1395,7 +1415,7 @@ impl App {
         let mut pick: Option<String> = None;
         section(ui, &title, None, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("unrealized").color(DIM).small());
+                ui.label(RichText::new("unrealized, net of fees").color(DIM).small());
                 signed(ui, total, 2, "");
             });
             TableBuilder::new(ui)
@@ -1408,7 +1428,7 @@ impl App {
             .column(Column::exact(70.0))
             .column(Column::remainder().at_least(62.0))
             .header(20.0, |mut h| {
-                for t in ["ISIN", "Qty", "Avg", "Mid", "Value", "P&L %"] {
+                for t in ["ISIN", "Qty", "Avg", "Mid", "Value", "Net %"] {
                     h.col(|ui| {
                         ui.label(RichText::new(t).strong());
                     });
@@ -1417,6 +1437,7 @@ impl App {
             .body(|body| {
                 body.rows(20.0, holdings.len(), |mut row| {
                     let h = &holdings[row.index()];
+                    let (fee_in, known) = fees[row.index()];
                     // Prefer the live polled mid over the snapshot the holdings call returned.
                     let live = quotes.get(&h.isin).and_then(|q| q.mid).or(h.mid);
                     row.col(|ui| {
@@ -1466,8 +1487,20 @@ impl App {
                         ui.label(RichText::new(num(h.valuation, 2)).monospace());
                     });
                     row.col(|ui| {
-                        ui.label(signed_text(h.unrealized_pct(), 2, "%"))
-                            .on_hover_text(format!("{} {}", num(h.unrealized(), 2), h.currency));
+                        // Net of the fees already paid and the one a sale would
+                        // cost. The gross figure is what misleads at small size.
+                        let fee_out = h.valuation.map(fee_for).unwrap_or(0.0);
+                        let t = signed_text(h.net_unrealized_pct(fee_in), 2, "%");
+                        let t = if known { t } else { t.italics() };
+                        ui.label(t).on_hover_text(format!(
+                            "net {} {cur}\ngross {} {cur} ({}%), price move only\n\
+                             fees in {fee_in:.2}{}, out {fee_out:.2}",
+                            num(h.net_unrealized(fee_in), 2),
+                            num(h.unrealized(), 2),
+                            num(h.unrealized_pct(), 2),
+                            if known { "" } else { " (assumed: one order, history incomplete)" },
+                            cur = h.currency,
+                        ));
                     });
                 });
             });
@@ -1488,13 +1521,14 @@ impl App {
         let Some(isin) = self.selected.clone() else {
             return;
         };
-        let (held, quote, sigma, account) = {
+        let (held, quote, sigma, account, ledger) = {
             let s = self.io.state.lock().unwrap();
             (
                 s.holdings.iter().find(|h| h.isin == isin).cloned(),
                 s.quotes.get(&isin).cloned(),
                 s.stats.get(&isin).map(|st| st.daily_vol),
                 s.account.total.unwrap_or(0.0),
+                s.ledger.clone(),
             )
         };
         let (Some(h), Some(q), Some(sigma)) = (held, quote, sigma) else {
@@ -1511,7 +1545,8 @@ impl App {
             target_sigmas: self.plan_target_sigmas,
             account,
         };
-        let Some(p) = PositionPlan::build(h.quantity, cost, bid, &ctx) else {
+        let (entry_fees, fees_known) = ledger.entry_fees(&h);
+        let Some(p) = PositionPlan::build(h.quantity, cost, entry_fees, bid, &ctx) else {
             return;
         };
 
@@ -1545,7 +1580,16 @@ impl App {
                 .show(ui, |ui| {
                     ui.label(RichText::new("cost").color(DIM));
                     ui.label(RichText::new(format!("{cost:.4}")).monospace());
-                    ui.label(RichText::new(format!("{:.2} out", p.outlay)).monospace());
+                    ui.label(RichText::new(format!("{:.2} out", p.outlay)).monospace())
+                        .on_hover_text(format!(
+                            "shares {:.2} + entry fees {entry_fees:.2}{}",
+                            p.outlay - entry_fees,
+                            if fees_known {
+                                ", as charged"
+                            } else {
+                                ", assumed: history does not match the position"
+                            }
+                        ));
                     ui.label(
                         RichText::new(format!("{:.4} sh", p.shares))
                             .color(DIM)
@@ -2352,22 +2396,37 @@ impl App {
             Tab::Chart => self.chart_view(ui),
             Tab::Derivatives => self.derivatives_view(ui),
             Tab::News => self.news_view(ui),
+            Tab::History => self.history_view(ui),
             Tab::Log => self.log_view(ui),
             Tab::Raw => self.raw_view(ui),
         });
     }
 
     fn portfolio_view(&mut self, ui: &mut egui::Ui) {
-        let (acct, holdings, analytics) = {
+        let (acct, holdings, analytics, ledger) = {
             let s = self.io.state.lock().unwrap();
-            (s.account.clone(), s.holdings.clone(), s.analytics.clone())
+            (
+                s.account.clone(),
+                s.holdings.clone(),
+                s.analytics.clone(),
+                s.ledger.clone(),
+            )
         };
+        let fees: Vec<f64> = holdings.iter().map(|h| ledger.entry_fees(h).0).collect();
 
         let unrealized: Option<f64> = {
-            let v: Vec<f64> = holdings.iter().filter_map(|h| h.unrealized()).collect();
+            let v: Vec<f64> = holdings
+                .iter()
+                .zip(&fees)
+                .filter_map(|(h, f)| h.net_unrealized(*f))
+                .collect();
             (!v.is_empty()).then(|| v.iter().sum())
         };
-        let cost: f64 = holdings.iter().filter_map(|h| h.cost_basis()).sum();
+        let cost: f64 = holdings
+            .iter()
+            .zip(&fees)
+            .filter_map(|(h, f)| h.cost_basis().map(|c| c + f))
+            .sum();
         let unrealized_pct = (cost.abs() > 1e-9).then(|| unrealized.unwrap_or(0.0) / cost * 100.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -2382,7 +2441,7 @@ impl App {
                 };
                 stat(
                     ui,
-                    "UNREALIZED",
+                    "UNREALIZED NET",
                     match (unrealized, unrealized_pct) {
                         (Some(u), Some(p)) => format!("{u:+.2} ({p:+.1}%)"),
                         _ => "—".into(),
@@ -2445,8 +2504,8 @@ impl App {
                         .column(Column::exact(70.0))
                         .header(20.0, |mut h| {
                             for t in [
-                                "ISIN", "Name", "Weight", "Qty", "Avg", "Mid", "Value", "P&L",
-                                "P&L %",
+                                "ISIN", "Name", "Weight", "Qty", "Avg", "Mid", "Value", "Net",
+                                "Net %",
                             ] {
                                 h.col(|ui| {
                                     ui.label(RichText::new(t).strong());
@@ -2455,7 +2514,8 @@ impl App {
                         })
                         .body(|body| {
                             body.rows(20.0, holdings.len(), |mut row| {
-                                let h = &holdings[row.index()];
+                                let i = row.index();
+                                let h = &holdings[i];
                                 row.col(|ui| {
                                     ui.label(RichText::new(&h.isin).monospace());
                                 });
@@ -2485,10 +2545,18 @@ impl App {
                                     ui.label(RichText::new(num(h.valuation, 2)).monospace());
                                 });
                                 row.col(|ui| {
-                                    ui.label(signed_text(h.unrealized(), 2, ""));
+                                    ui.label(signed_text(h.net_unrealized(fees[i]), 2, ""))
+                                        .on_hover_text(format!(
+                                            "gross {}, price move only",
+                                            num(h.unrealized(), 2)
+                                        ));
                                 });
                                 row.col(|ui| {
-                                    ui.label(signed_text(h.unrealized_pct(), 2, "%"));
+                                    ui.label(signed_text(h.net_unrealized_pct(fees[i]), 2, "%"))
+                                        .on_hover_text(format!(
+                                            "gross {}%",
+                                            num(h.unrealized_pct(), 2)
+                                        ));
                                 });
                             });
                         });
@@ -3366,6 +3434,334 @@ impl App {
             });
     }
 
+    /// Every booking on the account, and every closed trade with what it
+    /// really made after fees and tax.
+    fn history_view(&mut self, ui: &mut egui::Ui) {
+        let (txs, details, ledger, due) = {
+            let s = self.io.state.lock().unwrap();
+            (
+                s.transactions.clone(),
+                s.trade_details.clone(),
+                s.ledger.clone(),
+                s.detail_due.len(),
+            )
+        };
+        let sel = self.selected.clone();
+        let mut pick: Option<String> = None;
+
+        let closed: Vec<&Realized> = ledger
+            .realized
+            .iter()
+            .filter(|r| !self.hist_selected_only || sel.as_deref() == Some(r.isin.as_str()))
+            .collect();
+        let sum = |f: fn(&Realized) -> f64| closed.iter().map(|r| f(r)).sum::<f64>();
+        let (gross, fees, tax, net) = (
+            sum(|r| r.gross),
+            sum(|r| r.fees),
+            sum(|r| r.tax),
+            sum(|r| r.net),
+        );
+        let colour = |x: f64| {
+            if x > 0.0 {
+                GREEN
+            } else if x < 0.0 {
+                RED
+            } else {
+                DIM
+            }
+        };
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                stat(ui, "REALIZED NET", format!("{net:+.2}"), colour(net));
+                stat(ui, "GROSS", format!("{gross:+.2}"), colour(gross));
+                stat(
+                    ui,
+                    "FEES",
+                    cost_text(fees),
+                    if fees > 0.0 { RED } else { DIM },
+                );
+                stat(ui, "TAX", cost_text(tax), if tax > 0.0 { RED } else { DIM });
+                stat(ui, "CLOSED", format!("{}", closed.len()), DIM);
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.hist_selected_only, "selected instrument only");
+                ui.checkbox(&mut self.hist_cash, "cash bookings");
+                ui.checkbox(&mut self.hist_unfilled, "unfilled orders");
+                if due > 0 {
+                    ui.label(
+                        RichText::new(format!("fetching fees for {due} trades"))
+                            .color(AMBER)
+                            .small(),
+                    );
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.heading("Closed trades");
+            ui.label(
+                RichText::new(
+                    "Each sell matched first in, first out against the buys it closed. \
+                     Gross is the price move alone; net is the cash that came back \
+                     minus the cash that went in.",
+                )
+                .color(DIM)
+                .small(),
+            );
+            egui::ScrollArea::horizontal()
+                .id_salt("closed_h")
+                .show(ui, |ui| {
+                    TableBuilder::new(ui)
+                        .id_salt("closed")
+                        .striped(true)
+                        .cell_layout(egui::Layout::right_to_left(egui::Align::Center))
+                        .column(Column::exact(80.0))
+                        .column(Column::initial(200.0).at_least(100.0).clip(true))
+                        .column(Column::exact(60.0))
+                        .column(Column::exact(70.0))
+                        .column(Column::exact(70.0))
+                        .column(Column::exact(70.0))
+                        .column(Column::exact(60.0))
+                        .column(Column::exact(60.0))
+                        .column(Column::exact(70.0))
+                        .column(Column::exact(64.0))
+                        .header(20.0, |mut h| {
+                            for t in [
+                                "Closed",
+                                "Instrument",
+                                "Shares",
+                                "Buy avg",
+                                "Sell avg",
+                                "Gross",
+                                "Fees",
+                                "Tax",
+                                "Net",
+                                "Net %",
+                            ] {
+                                h.col(|ui| {
+                                    ui.label(RichText::new(t).strong());
+                                });
+                            }
+                        })
+                        .body(|body| {
+                            body.rows(20.0, closed.len(), |mut row| {
+                                let r = closed[row.index()];
+                                row.col(|ui| {
+                                    ui.label(RichText::new(day(&r.closed_at)).monospace())
+                                        .on_hover_text(format!("opened {}", day(&r.opened_at)));
+                                });
+                                row.col(|ui| {
+                                    let name = if r.name.is_empty() { &r.isin } else { &r.name };
+                                    if ui
+                                        .selectable_label(
+                                            sel.as_deref() == Some(r.isin.as_str()),
+                                            name,
+                                        )
+                                        .on_hover_text(&r.isin)
+                                        .clicked()
+                                    {
+                                        pick = Some(r.isin.clone());
+                                    }
+                                });
+                                if r.shares <= 0.0 {
+                                    row.col(|ui| {
+                                        ui.label(
+                                            RichText::new(format!("{}", r.unmatched)).monospace(),
+                                        );
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(
+                                            RichText::new("no buy in history").color(AMBER).small(),
+                                        );
+                                    });
+                                    for _ in 0..6 {
+                                        row.col(|_| {});
+                                    }
+                                    return;
+                                }
+                                row.col(|ui| {
+                                    let t = RichText::new(format!("{}", r.shares)).monospace();
+                                    if r.unmatched > 0.0 {
+                                        ui.label(t.color(AMBER)).on_hover_text(format!(
+                                            "{} more sold with no buy in history",
+                                            r.unmatched
+                                        ));
+                                    } else {
+                                        ui.label(t);
+                                    }
+                                });
+                                row.col(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("{:.4}", r.buy_avg)).monospace(),
+                                    );
+                                });
+                                row.col(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("{:.4}", r.sell_avg)).monospace(),
+                                    );
+                                });
+                                row.col(|ui| {
+                                    ui.label(signed_text(Some(r.gross), 2, ""))
+                                        .on_hover_text(format!("{:+.2}%", r.gross_pct() * 100.0));
+                                });
+                                row.col(|ui| {
+                                    ui.label(RichText::new(cost_text(r.fees)).monospace());
+                                });
+                                row.col(|ui| {
+                                    ui.label(RichText::new(cost_text(r.tax)).monospace());
+                                });
+                                row.col(|ui| {
+                                    ui.label(signed_text(Some(r.net), 2, "").strong());
+                                });
+                                row.col(|ui| {
+                                    ui.label(signed_text(Some(r.net_pct() * 100.0), 2, "%"))
+                                        .on_hover_text(format!(
+                                            "on {:.2} put in, fees included",
+                                            r.outlay
+                                        ));
+                                });
+                            });
+                        });
+                });
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.heading("Transactions");
+            let mut rows: Vec<&Transaction> = txs
+                .iter()
+                .filter(|t| self.hist_cash || t.is_trade())
+                .filter(|t| {
+                    self.hist_unfilled || !t.is_trade() || t.has_fill() || t.status == "PENDING"
+                })
+                .filter(|t| !self.hist_selected_only || sel.as_deref() == Some(t.isin.as_str()))
+                .collect();
+            // The broker lists working orders first; read as a timeline instead.
+            rows.sort_by(|a, b| b.at.cmp(&a.at));
+            egui::ScrollArea::horizontal()
+                .id_salt("tx_h")
+                .show(ui, |ui| {
+                    TableBuilder::new(ui)
+                        .id_salt("tx")
+                        .striped(true)
+                        .cell_layout(egui::Layout::right_to_left(egui::Align::Center))
+                        .column(Column::exact(128.0))
+                        .column(Column::exact(128.0))
+                        .column(Column::initial(200.0).at_least(100.0).clip(true))
+                        .column(Column::exact(60.0))
+                        .column(Column::exact(70.0))
+                        .column(Column::exact(74.0))
+                        .column(Column::exact(56.0))
+                        .column(Column::exact(56.0))
+                        .column(Column::exact(80.0))
+                        .column(Column::exact(80.0))
+                        .header(20.0, |mut h| {
+                            for t in [
+                                "Time UTC",
+                                "Type",
+                                "Instrument",
+                                "Shares",
+                                "Price",
+                                "Value",
+                                "Fee",
+                                "Tax",
+                                "Cash",
+                                "Status",
+                            ] {
+                                h.col(|ui| {
+                                    ui.label(RichText::new(t).strong());
+                                });
+                            }
+                        })
+                        .body(|body| {
+                            body.rows(20.0, rows.len(), |mut row| {
+                                let t = rows[row.index()];
+                                let d = details.get(&t.id);
+                                row.col(|ui| {
+                                    ui.label(RichText::new(minute(&t.at)).monospace());
+                                });
+                                row.col(|ui| {
+                                    let c = match t.side.as_str() {
+                                        "BUY" => GREEN,
+                                        "SELL" => RED,
+                                        _ => DIM,
+                                    };
+                                    ui.label(RichText::new(t.label()).color(c));
+                                });
+                                row.col(|ui| {
+                                    let name = if t.description.is_empty() {
+                                        t.isin.as_str()
+                                    } else {
+                                        t.description.as_str()
+                                    };
+                                    if t.isin.is_empty() {
+                                        ui.label(name);
+                                    } else if ui
+                                        .selectable_label(
+                                            sel.as_deref() == Some(t.isin.as_str()),
+                                            name,
+                                        )
+                                        .on_hover_text(&t.isin)
+                                        .clicked()
+                                    {
+                                        pick = Some(t.isin.clone());
+                                    }
+                                });
+                                // A fill shows what happened; an unfilled order
+                                // only what was asked, dimmed.
+                                let (shares, price, value) = match d {
+                                    Some(d) => {
+                                        (Some(d.filled), Some(d.average_price), Some(d.valuation))
+                                    }
+                                    None => (t.quantity, t.limit_price.or(t.stop_price), None),
+                                };
+                                let filled = d.is_some();
+                                row.col(|ui| {
+                                    let x = RichText::new(num(shares, 0)).monospace();
+                                    ui.label(if filled { x } else { x.color(DIM) });
+                                });
+                                row.col(|ui| {
+                                    let x = RichText::new(num(price, 4)).monospace();
+                                    ui.label(if filled { x } else { x.color(DIM) })
+                                        .on_hover_text(match d {
+                                            Some(d) => format!("average fill, venue {}", d.venue),
+                                            None => "order price, not a fill".into(),
+                                        });
+                                });
+                                row.col(|ui| {
+                                    ui.label(RichText::new(num(value, 2)).monospace());
+                                });
+                                row.col(|ui| {
+                                    ui.label(RichText::new(num(d.map(|d| d.fee), 2)).monospace());
+                                });
+                                row.col(|ui| {
+                                    ui.label(RichText::new(num(d.map(|d| d.tax), 2)).monospace());
+                                });
+                                row.col(|ui| {
+                                    // An order that has not filled has moved no cash.
+                                    let cash = t.amount.filter(|a| a.abs() > 1e-9);
+                                    ui.label(signed_text(cash, 2, "")).on_hover_text(format!(
+                                        "{}, after fees and tax",
+                                        t.currency
+                                    ));
+                                });
+                                row.col(|ui| {
+                                    let c = match t.status.as_str() {
+                                        "PENDING" => AMBER,
+                                        "CANCELLED" | "REJECTED" | "EXPIRED" => DIM,
+                                        _ => Color32::GRAY,
+                                    };
+                                    ui.label(RichText::new(&t.status).color(c).small());
+                                });
+                            });
+                        });
+                });
+        });
+
+        if let Some(isin) = pick {
+            self.select(isin);
+        }
+    }
+
     fn log_view(&mut self, ui: &mut egui::Ui) {
         let log = { self.io.state.lock().unwrap().log.clone() };
         ui.label(RichText::new("every `sc` invocation, timed, newest first").color(DIM));
@@ -3660,6 +4056,27 @@ fn hhmm(t: f64) -> String {
         rem / 3600,
         (rem % 3600) / 60
     )
+}
+
+/// A cost shown as money leaving, without a negative zero.
+fn cost_text(x: f64) -> String {
+    if x.abs() < 0.005 {
+        "0.00".into()
+    } else {
+        format!("{:.2}", -x)
+    }
+}
+
+/// `2026-10-05T09:33:06.373Z` -> `2026-10-05 09:33`.
+fn minute(ts: &str) -> String {
+    match (ts.get(0..10), ts.get(11..16)) {
+        (Some(d), Some(t)) => format!("{d} {t}"),
+        _ => ts.to_string(),
+    }
+}
+
+fn day(ts: &str) -> String {
+    ts.get(0..10).unwrap_or(ts).to_string()
 }
 
 fn civil_from_days(z: i64) -> (i64, i64, i64) {

@@ -110,12 +110,13 @@ Dependencies: eframe, egui, egui_extras, egui_plot, serde, serde_json, image.
 
 ## Storage
 
-No database. Broker state is never cached to disk, it is refetched from `sc` on every run. Only local state that the broker knows nothing about is written, as two JSON files in `~/.config/scalable-terminal/`:
+No database. Broker state is refetched from `sc` on every run. What is written lives as JSON files in `~/.config/scalable-terminal/`:
 
 * `workspace.json` holds your custom lists and their ordering, the tags you apply to instruments, and interface preferences: refresh interval, chart style and timeframe, moving average toggles, bar density and the ranking column.
 * `trails.json` holds the high water mark of each armed trailing stop. That is the one piece of a trail that cannot be recovered from the broker, so it has to survive a restart.
+* `trades.json` caches the detail of every settled trade, raw as the broker returned it. A settled booking never changes, and fetching the detail costs one call per trade, so it is fetched once. The only broker data kept on disk.
 
-Delete either file and the app starts fresh with defaults.
+Delete any file and the app starts fresh with defaults.
 
 ## Screen
 
@@ -202,7 +203,7 @@ Main area:
 
 `?` opens a window listing every binding, generated from the same table the handler uses, so the list cannot drift from what actually works. The top bar carries a `?` button for the same thing.
 
-Navigation is `1` to `5` for the views, arrows for the instrument, `/` and `A` for the search and add fields. `R` refreshes, `Space` pauses polling. On the chart, `[` and `]` step the timeframe, `C` switches candles and line, `Z` `X` `V` toggle the moving averages. On the ticket, `B` and `S` set the side, `M` `L` `T` the order type, `P` cycles the limit through bid, mid and ask, and `Enter` previews.
+Navigation is `1` to `6` for the views, arrows for the instrument, `/` and `A` for the search and add fields. `R` refreshes, `Space` pauses polling. On the chart, `[` and `]` step the timeframe, `C` switches candles and line, `Z` `X` `V` toggle the moving averages. On the ticket, `B` and `S` set the side, `M` `L` `T` the order type, `P` cycles the limit through bid, mid and ask, and `Enter` previews.
 
 Submitting an order has no shortcut and will not get one. The same goes for moving a trailing stop, which cancels a live stop. Both stay behind a deliberate click, and the help window says so rather than leaving the omission to look like an oversight.
 
@@ -244,14 +245,35 @@ Selecting an instrument you hold shows the same questions asked of the open posi
 ```
 Position Village Farms International      1 sd = 2.86%
 
-cost          2.7317   82.94 out    30.0000 sh
-sell now      2.5300   -8.03 EUR    -9.68% net
-break even    2.7977  +10.58% away  bid must reach this
+cost          2.7317   83.93 out    30.0000 sh
+sell now      2.5300   -9.02 EUR   -10.75% net
+break even    2.8307  +11.89% away  bid must reach this
 stop          2.4915   -2.17 EUR    0.3% of account
 target        2.7119   +4.35 EUR    from here
 ```
 
+Entry fees are the ones actually charged, read from the trade history: the position above was bought in two orders and paid 0.99 twice. When the history does not reproduce the broker's share count and average price, one order's fee is assumed and the hover says so.
+
+The Positions table shows the same net figure. Its `Net %` takes off the entry fees paid and the fee a sale would cost; the gross percentage, which is what most trackers show, is in the hover. At small size the two disagree in sign: COSCO was +5.9% gross and -1.0% net.
+
 Risk here is what a stop costs compared with selling now, not what the whole position could lose, because the money is already committed. Break even is the bid, since that is where a sale lands.
+
+## History
+
+Every booking on the account: trades, deposits, fees, stornos. Unfilled and cancelled orders are hidden by default, cash bookings can be hidden, and the view can be narrowed to the selected instrument.
+
+The transaction list carries only the net cash of each booking. The fill price, fee and tax come from `sc broker transaction details`, one call per trade, fetched in the background one a second and cached once settled. The sell fee never shows as a row of its own: the broker nets it out of the proceeds, so a 20 share sale at 2.26 credits 44.21, not 45.20.
+
+Closed trades match each sell first in, first out against the buys it closed:
+
+```
+Closed      Instrument   Shares  Buy avg  Sell avg  Gross   Fees   Tax    Net   Net %
+2026-10-05  COSCO            20   2.1345    2.2600  +2.51  -2.97  0.00  -0.46  -1.03%
+```
+
+Gross is the price move. Net is cash in minus cash out, so it includes whatever the broker charged, tax too. A storno is dropped together with the booking it reverses. A sell with no matching buy in the history is shown as unmatched rather than as profit on zero cost.
+
+`broker transactions` returns 20 rows unless told otherwise. The app asks for 100 per page and follows the cursor, so older working orders are not silently dropped either.
 
 ## Orders
 
@@ -309,6 +331,8 @@ The broker's own order records carry a `trailing_stop_info` field, so the backen
 No streaming. No websocket or server sent events in the CLI, so prices are polled, one process per instrument, eight at a time. The round time is always on screen.
 
 No market depth. Level one only.
+
+No documents. Contract notes and cost information are listed on each transaction but the CLI has no command to download them.
 
 No OHLC. The chart endpoint returns mid price ticks, so candles and bars are built here by bucketing ticks into intervals. Open and close are the first and last tick in a bucket, high and low its extremes. Empty buckets are skipped rather than carried forward, so a gap stays a gap instead of becoming a flat bar that never traded.
 
@@ -368,4 +392,4 @@ Verified against a live account: every read shape, quote polling and its timings
 
 Error handling has been exercised in production rather than only in tests: backend rate limits and the recovery after them, the Secure Enclave refusing to sign while the Mac is locked, and the broker declining a watchlist add inside an `ok` response.
 
-Not yet exercised: stop and market orders, selling, the trailing stop ratchet, and accounts unlike the one it was built against, which has five positions in a single currency, no crypto and no savings plans.
+A limit sell has filled and settled, and its fee read back from the trade detail. Not yet exercised: stop and market orders, a taxed sale, the trailing stop ratchet, and accounts unlike the one it was built against, which has five positions in a single currency, no crypto and no savings plans.

@@ -287,6 +287,23 @@ impl Holding {
         }
     }
 
+    /// What selling at the current valuation would leave after every fee:
+    /// the entry fees already paid and the one the sale would cost.
+    pub fn net_unrealized(&self, entry_fees: f64) -> Option<f64> {
+        match (self.valuation, self.cost_basis()) {
+            (Some(v), Some(c)) => Some(v - fee_for(v) - c - entry_fees),
+            _ => None,
+        }
+    }
+
+    /// Net result against everything put in, fees included.
+    pub fn net_unrealized_pct(&self, entry_fees: f64) -> Option<f64> {
+        match (self.net_unrealized(entry_fees), self.cost_basis()) {
+            (Some(u), Some(c)) if c + entry_fees > 1e-9 => Some(u / (c + entry_fees) * 100.0),
+            _ => None,
+        }
+    }
+
     pub fn unrealized_pct(&self) -> Option<f64> {
         match (self.unrealized(), self.cost_basis()) {
             (Some(u), Some(c)) if c.abs() > 1e-9 => Some(u / c * 100.0),
@@ -1405,14 +1422,23 @@ pub struct PositionPlan {
 }
 
 impl PositionPlan {
-    pub fn build(shares: f64, cost: f64, bid: f64, c: &PlanContext) -> Option<PositionPlan> {
+    /// `entry_fees` is what the buys still held actually paid. One position can
+    /// be several orders, each with its own fee, so it cannot be inferred from
+    /// the cost basis.
+    pub fn build(
+        shares: f64,
+        cost: f64,
+        entry_fees: f64,
+        bid: f64,
+        c: &PlanContext,
+    ) -> Option<PositionPlan> {
         let (sigma, half_spread, account) = (c.sigma, c.half_spread, c.account);
         let (stop_sigmas, target_sigmas) = (c.stop_sigmas, c.target_sigmas);
         if shares <= 0.0 || cost <= 0.0 || bid <= 0.0 || sigma <= 0.0 {
             return None;
         }
         let basis = shares * cost;
-        let outlay = basis + fee_for(basis);
+        let outlay = basis + entry_fees.max(0.0);
 
         // Everything is measured at the bid, because that is where a sale lands.
         let proceeds_at_bid = |b: f64| {
@@ -1464,5 +1490,392 @@ impl PositionPlan {
     /// True once selling would return more than the position cost.
     pub fn in_profit(&self) -> bool {
         self.net_now > 0.0
+    }
+}
+
+/// One row of `broker transactions`, of any type: trades, deposits, fees,
+/// interest. The list carries no fill price and no fee, only the net cash
+/// amount, so a trade's breakdown comes from `TradeDetail`.
+#[derive(Debug, Clone, Default)]
+pub struct Transaction {
+    pub id: String,
+    /// `SECURITY_TRANSACTION` or `CASH_TRANSACTION`.
+    pub kind: String,
+    /// For cash rows: `DEPOSIT`, `FEE`, `WITHDRAWAL`, ...
+    pub cash_type: String,
+    pub side: String,
+    pub status: String,
+    pub isin: String,
+    pub description: String,
+    /// Ordered size, not the filled size.
+    pub quantity: Option<f64>,
+    /// Net cash effect: negative for a buy, after fees and taxes.
+    pub amount: Option<f64>,
+    pub limit_price: Option<f64>,
+    pub stop_price: Option<f64>,
+    pub currency: String,
+    /// UTC.
+    pub at: String,
+    /// A storno: the broker reversing an earlier booking.
+    pub is_cancellation: bool,
+}
+
+impl Transaction {
+    pub fn list_from(v: &Value) -> Vec<Transaction> {
+        pick(v, &["items"])
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|t| Transaction {
+                        id: str_at(t, &["id"]).unwrap_or_default(),
+                        kind: str_at(t, &["type"]).unwrap_or_default(),
+                        cash_type: str_at(t, &["cash_transaction_type"]).unwrap_or_default(),
+                        side: str_at(t, &["side"]).unwrap_or_default(),
+                        status: str_at(t, &["status"]).unwrap_or_default(),
+                        isin: str_at(t, &["isin", "related_isin"]).unwrap_or_default(),
+                        description: str_at(t, &["description"]).unwrap_or_default(),
+                        quantity: f64_at(t, &["quantity"]),
+                        amount: f64_at(t, &["amount"]),
+                        limit_price: f64_at(t, &["limit_price"]),
+                        stop_price: f64_at(t, &["stop_price"]),
+                        currency: str_at(t, &["currency"]).unwrap_or_default(),
+                        at: str_at(t, &["last_event_datetime"]).unwrap_or_default(),
+                        is_cancellation: bool_at(t, "is_cancellation"),
+                    })
+                    .filter(|t| !t.id.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The pagination cursor, absent on the last page.
+    pub fn cursor(v: &Value) -> Option<String> {
+        str_at(v, &["cursor"]).filter(|c| !c.is_empty())
+    }
+
+    pub fn is_trade(&self) -> bool {
+        self.kind == "SECURITY_TRANSACTION"
+    }
+
+    /// A trade that moved shares. Status alone does not say so: a cancelled
+    /// order may have part filled first. A non-zero cash amount does.
+    pub fn has_fill(&self) -> bool {
+        self.is_trade() && self.amount.is_some_and(|a| a.abs() > 1e-9)
+    }
+
+    /// Settled bookings never change again, so their detail can be cached for good.
+    pub fn is_final(&self) -> bool {
+        self.status == "SETTLED"
+    }
+
+    /// What kind of row this is, in one word for a table.
+    pub fn label(&self) -> String {
+        let base = if self.is_trade() {
+            self.side.clone()
+        } else if self.cash_type.is_empty() {
+            "CASH".into()
+        } else {
+            self.cash_type.clone()
+        };
+        if self.is_cancellation {
+            format!("{base} storno")
+        } else {
+            base
+        }
+    }
+}
+
+/// `broker transaction details` for one trade: the fill and what it cost.
+///
+/// `total_amount` is the cash that actually moved. For a buy it is
+/// `-(market_valuation + fees)`, for a sell `market_valuation - fees - tax`,
+/// so the sell fee never appears as a row of its own in the list.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TradeDetail {
+    pub id: String,
+    pub isin: String,
+    pub name: String,
+    pub side: String,
+    pub is_cancellation: bool,
+    pub filled: f64,
+    pub average_price: f64,
+    /// Shares times price, before any fee.
+    pub valuation: f64,
+    /// Transaction, venue and crypto spread fees together.
+    pub fee: f64,
+    pub tax: f64,
+    /// Net cash effect, signed.
+    pub total: f64,
+    /// Time of the last fill, as the details endpoint reports it. It carries
+    /// no zone and is not UTC, but it is consistent across details, which is
+    /// all ordering needs.
+    pub filled_at: String,
+    pub venue: String,
+}
+
+impl TradeDetail {
+    /// Takes the unwrapped `result`. None for anything that is not a trade.
+    pub fn from_json(v: &Value) -> Option<TradeDetail> {
+        let t = pick(v, &["security_trade"])?;
+        let amt = |k: &str| f64_at(t, &[&format!("trade_transaction_amounts/{k}")]).unwrap_or(0.0);
+        let filled_at = pick(v, &["history"])
+            .and_then(Value::as_array)
+            .and_then(|h| {
+                h.iter()
+                    .rev()
+                    .find(|e| str_at(e, &["state"]).is_some_and(|s| s.contains("FILLED")))
+                    .and_then(|e| str_at(e, &["timestamp"]))
+            })
+            .or_else(|| str_at(v, &["last_event_datetime"]))
+            .unwrap_or_default();
+        Some(TradeDetail {
+            id: str_at(v, &["id"]).unwrap_or_default(),
+            isin: str_at(v, &["security/isin"]).unwrap_or_default(),
+            name: str_at(v, &["security/name"]).unwrap_or_default(),
+            side: str_at(t, &["side"]).unwrap_or_default(),
+            is_cancellation: bool_at(v, "is_cancellation"),
+            filled: f64_at(t, &["number_of_shares/filled"]).unwrap_or(0.0),
+            average_price: f64_at(t, &["average_price"]).unwrap_or(0.0),
+            valuation: amt("market_valuation"),
+            fee: amt("transaction_fee") + amt("venue_fee") + amt("crypto_spread_fee"),
+            tax: amt("tax_amount"),
+            total: f64_at(t, &["total_amount"]).unwrap_or(0.0),
+            filled_at,
+            venue: str_at(t, &["trading_venue"]).unwrap_or_default(),
+        })
+    }
+
+    fn is_buy(&self) -> bool {
+        self.side.eq_ignore_ascii_case("BUY")
+    }
+
+    fn is_sell(&self) -> bool {
+        self.side.eq_ignore_ascii_case("SELL")
+    }
+}
+
+/// A closed trade: one sell matched FIFO against the buys it consumed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Realized {
+    pub isin: String,
+    pub name: String,
+    pub sell_id: String,
+    pub closed_at: String,
+    pub opened_at: String,
+    pub shares: f64,
+    pub buy_avg: f64,
+    pub sell_avg: f64,
+    /// Price move only, what a tracker that ignores costs reports.
+    pub gross: f64,
+    /// Entry fees of the matched buys plus the exit fee.
+    pub fees: f64,
+    pub tax: f64,
+    /// Cash in minus cash out.
+    pub net: f64,
+    /// Cash put in for the matched shares, fees included.
+    pub outlay: f64,
+    /// Sold shares with no buy in the history to match, e.g. transferred in.
+    /// Those are left out of every figure above.
+    pub unmatched: f64,
+}
+
+impl Realized {
+    pub fn gross_pct(&self) -> f64 {
+        let cost = self.outlay - self.entry_fees();
+        if cost > 0.0 { self.gross / cost } else { 0.0 }
+    }
+
+    pub fn net_pct(&self) -> f64 {
+        if self.outlay > 0.0 {
+            self.net / self.outlay
+        } else {
+            0.0
+        }
+    }
+
+    fn entry_fees(&self) -> f64 {
+        self.outlay - self.shares * self.buy_avg
+    }
+}
+
+/// What is left of a position after every sell has taken its shares.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct OpenLot {
+    pub shares: f64,
+    /// Shares times fill price, before fees.
+    pub cost: f64,
+    /// Fees paid on the buys still held.
+    pub fees: f64,
+}
+
+impl OpenLot {
+    pub fn avg(&self) -> f64 {
+        if self.shares > 0.0 {
+            self.cost / self.shares
+        } else {
+            0.0
+        }
+    }
+
+    /// True when this agrees with what the broker says is held. When it does
+    /// not, the history is incomplete and its fees cannot be trusted.
+    pub fn matches(&self, h: &Holding) -> bool {
+        let Some(fifo) = h.fifo_price else {
+            return false;
+        };
+        (self.shares - h.quantity).abs() < 1e-6
+            && (self.avg() - fifo).abs() <= fifo.abs() * 1e-3 + 1e-6
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Lot {
+    shares: f64,
+    price: f64,
+    cash_per_share: f64,
+    fee_per_share: f64,
+}
+
+/// FIFO ledger over every filled trade, built from broker cash amounts so fees
+/// and taxes are whatever the broker actually charged.
+#[derive(Debug, Clone, Default)]
+pub struct Ledger {
+    /// Newest first.
+    pub realized: Vec<Realized>,
+    pub open: std::collections::HashMap<String, OpenLot>,
+}
+
+impl Ledger {
+    pub fn build(details: &[TradeDetail]) -> Ledger {
+        // Only an explicit side moves shares. A booking of unknown kind is left
+        // out rather than guessed at, which would invent a sale.
+        let mut trades: Vec<&TradeDetail> = details
+            .iter()
+            .filter(|d| d.filled > 0.0 && (d.is_buy() || d.is_sell()))
+            .collect();
+
+        // A storno reverses a whole booking. Drop it together with the trade it
+        // reverses, which has the same instrument, side, size and price. The fee
+        // comes back as a separate cash row, so the pair cost nothing.
+        let mut dropped = vec![false; trades.len()];
+        for i in 0..trades.len() {
+            if !trades[i].is_cancellation {
+                continue;
+            }
+            dropped[i] = true;
+            let c = trades[i];
+            if let Some(j) = (0..trades.len()).find(|&j| {
+                !dropped[j]
+                    && !trades[j].is_cancellation
+                    && trades[j].isin == c.isin
+                    && trades[j].side == c.side
+                    && (trades[j].filled - c.filled).abs() < 1e-9
+                    && (trades[j].average_price - c.average_price).abs() < 1e-9
+            }) {
+                dropped[j] = true;
+            }
+        }
+        trades = trades
+            .into_iter()
+            .zip(dropped)
+            .filter(|(_, d)| !d)
+            .map(|(t, _)| t)
+            .collect();
+        trades.sort_by(|a, b| a.filled_at.cmp(&b.filled_at));
+
+        let mut lots: std::collections::HashMap<String, std::collections::VecDeque<(Lot, String)>> =
+            Default::default();
+        let mut realized = Vec::new();
+        for t in trades {
+            let queue = lots.entry(t.isin.clone()).or_default();
+            if t.is_buy() {
+                queue.push_back((
+                    Lot {
+                        shares: t.filled,
+                        price: t.valuation / t.filled,
+                        cash_per_share: -t.total / t.filled,
+                        fee_per_share: t.fee / t.filled,
+                    },
+                    t.filled_at.clone(),
+                ));
+                continue;
+            }
+            let mut left = t.filled;
+            let (mut matched, mut cost, mut outlay, mut entry_fees) = (0.0, 0.0, 0.0, 0.0);
+            let mut opened_at = String::new();
+            while left > 1e-9 {
+                let Some((lot, at)) = queue.front_mut() else {
+                    break;
+                };
+                if opened_at.is_empty() {
+                    opened_at = at.clone();
+                }
+                let take = lot.shares.min(left);
+                matched += take;
+                cost += take * lot.price;
+                outlay += take * lot.cash_per_share;
+                entry_fees += take * lot.fee_per_share;
+                lot.shares -= take;
+                left -= take;
+                if lot.shares <= 1e-9 {
+                    queue.pop_front();
+                }
+            }
+            if matched <= 0.0 {
+                realized.push(Realized {
+                    isin: t.isin.clone(),
+                    name: t.name.clone(),
+                    sell_id: t.id.clone(),
+                    closed_at: t.filled_at.clone(),
+                    sell_avg: t.average_price,
+                    unmatched: t.filled,
+                    ..Default::default()
+                });
+                continue;
+            }
+            let f = matched / t.filled;
+            let proceeds = t.valuation * f;
+            realized.push(Realized {
+                isin: t.isin.clone(),
+                name: t.name.clone(),
+                sell_id: t.id.clone(),
+                closed_at: t.filled_at.clone(),
+                opened_at,
+                shares: matched,
+                buy_avg: cost / matched,
+                sell_avg: proceeds / matched,
+                gross: proceeds - cost,
+                fees: entry_fees + t.fee * f,
+                tax: t.tax * f,
+                net: t.total * f - outlay,
+                outlay,
+                unmatched: t.filled - matched,
+            });
+        }
+
+        let open = lots
+            .into_iter()
+            .filter_map(|(isin, q)| {
+                let mut o = OpenLot::default();
+                for (l, _) in &q {
+                    o.shares += l.shares;
+                    o.cost += l.shares * l.price;
+                    o.fees += l.shares * l.fee_per_share;
+                }
+                (o.shares > 1e-9).then_some((isin, o))
+            })
+            .collect();
+        realized.reverse();
+        Ledger { realized, open }
+    }
+
+    /// Entry fees for a holding, and whether they are known or assumed. Known
+    /// only when the ledger reproduces the broker's own share count and price;
+    /// otherwise one order's fee on the cost basis is assumed.
+    pub fn entry_fees(&self, h: &Holding) -> (f64, bool) {
+        match self.open.get(&h.isin) {
+            Some(o) if o.matches(h) => (o.fees, true),
+            _ => (h.cost_basis().map(fee_for).unwrap_or(0.0), false),
+        }
     }
 }

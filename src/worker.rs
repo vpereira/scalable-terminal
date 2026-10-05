@@ -21,6 +21,13 @@ pub const BACKFILL_INTERVAL: Duration = Duration::from_secs(12);
 /// Daily movement over three months does not change meaningfully within a day.
 pub const STATS_MAX_AGE_SECS: f64 = 86_400.0;
 pub const RATE_LIMIT_BACKOFF_MAX: Duration = Duration::from_secs(900);
+/// Gap between trade detail requests. The endpoint has no measured limit, so
+/// these go one at a time rather than fanned out like quotes.
+pub const DETAIL_INTERVAL: Duration = Duration::from_secs(1);
+/// `broker transactions` defaults to 20 rows, which silently drops anything
+/// older, working orders included. Ask for the maximum and follow the cursor.
+pub const TRANSACTIONS_PAGE: &str = "100";
+const TRANSACTIONS_MAX_PAGES: usize = 50;
 
 /// Which instruments to poll this round.
 ///
@@ -177,6 +184,19 @@ pub struct Shared {
     pub names: HashMap<String, String>,
     pub holdings: Vec<Holding>,
     pub orders: Vec<PendingOrder>,
+    /// Full account history, newest first.
+    pub transactions: Vec<Transaction>,
+    /// Fill, fee and tax per trade, by transaction id.
+    pub trade_details: HashMap<String, TradeDetail>,
+    /// Raw detail payloads of settled trades, persisted because they never change.
+    detail_raw: HashMap<String, Value>,
+    /// Trades whose detail is still to fetch.
+    pub detail_due: Vec<String>,
+    /// Ids whose detail came back as something other than a trade. Not asked
+    /// for again this session.
+    not_trades: std::collections::HashSet<String>,
+    last_detail: Option<Instant>,
+    pub ledger: Ledger,
     pub alerts: Vec<PriceAlert>,
     pub alert_error: Option<String>,
     pub account: Account,
@@ -311,6 +331,14 @@ fn worker_loop(
     check_session(&state);
     {
         let mut s = state.lock().unwrap();
+        s.detail_raw = load_details();
+        let parsed: Vec<(String, TradeDetail)> = s
+            .detail_raw
+            .iter()
+            .filter_map(|(id, v)| Some((id.clone(), TradeDetail::from_json(v)?)))
+            .collect();
+        s.trade_details.extend(parsed);
+        s.rebuild_ledger();
         s.trails = load_trails();
         let (stats, at) = load_stats();
         s.stats = stats;
@@ -336,6 +364,7 @@ fn worker_loop(
         }
 
         backfill_one(&state, &ctx);
+        fetch_detail_one(&state, &ctx);
 
         // Once the backoff lapses, make good on the retry we promised.
         let retry = {
@@ -378,6 +407,11 @@ fn worker_loop(
 }
 
 impl Shared {
+    fn rebuild_ledger(&mut self) {
+        let all: Vec<TradeDetail> = self.trade_details.values().cloned().collect();
+        self.ledger = Ledger::build(&all);
+    }
+
     /// What to poll. The UI sets this from the active list; until it has, fall
     /// back to the broker watchlist plus holdings so startup is never blank.
     fn poll_targets(&self) -> Vec<String> {
@@ -617,6 +651,130 @@ fn check_session(state: &Arc<Mutex<Shared>>) {
     }
 }
 
+/// Every page of `broker transactions`, merged into one `{items: [...]}`
+/// payload. Fails as a whole if any page fails, so a partial history is never
+/// mistaken for the full one.
+fn fetch_transactions() -> sc::Call {
+    let mut items: Vec<Value> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut elapsed = Duration::ZERO;
+    for _ in 0..TRANSACTIONS_MAX_PAGES {
+        let mut args = vec!["broker", "transactions", "--page-size", TRANSACTIONS_PAGE];
+        if let Some(c) = cursor.as_deref() {
+            args.push("--cursor");
+            args.push(c);
+        }
+        let mut call = sc::run(&args);
+        elapsed += call.elapsed;
+        let v = match &call.data {
+            Ok(v) => sc::result(v).clone(),
+            Err(_) => {
+                call.elapsed = elapsed;
+                return call;
+            }
+        };
+        if let Some(a) = v.get("items").and_then(Value::as_array) {
+            items.extend(a.iter().cloned());
+        }
+        cursor = Transaction::cursor(&v);
+        if cursor.is_none() {
+            call.elapsed = elapsed;
+            call.data = Ok(serde_json::json!({ "items": items }));
+            return call;
+        }
+    }
+    sc::Call {
+        argv: vec!["broker".into(), "transactions".into()],
+        elapsed,
+        raw: String::new(),
+        data: Err(sc::ScError {
+            kind: sc::ScErrorKind::Generic,
+            code: "too_many_pages".into(),
+            message: format!("history exceeds {TRANSACTIONS_MAX_PAGES} pages"),
+            hints: vec![],
+        }),
+    }
+}
+
+/// Fetch the detail of one trade, if any is due. Paced and sequential so it
+/// stays off the refresh path and never bursts an endpoint of unknown limits.
+fn fetch_detail_one(state: &Arc<Mutex<Shared>>, ctx: &egui::Context) {
+    let id = {
+        let mut s = state.lock().unwrap();
+        if s.backoff_secs_left().is_some()
+            || s.last_detail.is_some_and(|t| t.elapsed() < DETAIL_INTERVAL)
+            || s.detail_due.is_empty()
+        {
+            return;
+        }
+        s.last_detail = Some(Instant::now());
+        s.detail_due.remove(0)
+    };
+    let call = sc::run(&["broker", "transaction", "details", "--transaction-id", &id]);
+    let mut s = state.lock().unwrap();
+    match &call.data {
+        Ok(v) => {
+            let r = sc::result(v).clone();
+            let Some(d) = TradeDetail::from_json(&r) else {
+                s.not_trades.insert(id.clone());
+                s.push_log(
+                    "trade.details",
+                    call.elapsed.as_millis(),
+                    false,
+                    format!("{id}: not a trade"),
+                );
+                return;
+            };
+            let settled = s.transactions.iter().any(|t| t.id == id && t.is_final());
+            let msg = format!("{} {} {} fee {:.2}", d.side, d.filled, d.name, d.fee);
+            s.trade_details.insert(id.clone(), d);
+            s.rebuild_ledger();
+            if settled {
+                s.detail_raw.insert(id, r);
+                save_details(&s.detail_raw);
+            }
+            s.push_log("trade.details", call.elapsed.as_millis(), true, msg);
+        }
+        Err(e) => {
+            if e.kind == sc::ScErrorKind::RateLimited {
+                // Try again once the pause lapses.
+                s.detail_due.push(id);
+                s.note_rate_limit("trade.details");
+            } else {
+                s.push_log(
+                    "trade.details",
+                    call.elapsed.as_millis(),
+                    false,
+                    format!("{id}: {e}"),
+                );
+            }
+        }
+    }
+    ctx.request_repaint();
+}
+
+fn details_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".config/scalable-terminal/trades.json")
+}
+
+/// Settled trade details, raw as the broker returned them, so a change to the
+/// parser applies to the cache too.
+fn save_details(raw: &HashMap<String, Value>) {
+    let path = details_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, serde_json::to_string_pretty(raw).unwrap_or_default());
+}
+
+fn load_details() -> HashMap<String, Value> {
+    std::fs::read_to_string(details_path())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
 fn refresh_account(state: &Arc<Mutex<Shared>>) {
     state.lock().unwrap().refreshing = true;
     // Five independent endpoints. Serially that is ~1 s on every refresh, and a
@@ -626,7 +784,7 @@ fn refresh_account(state: &Arc<Mutex<Shared>>) {
         let a = scope.spawn(|| sc::run(&["broker", "overview"]));
         let b = scope.spawn(|| sc::run(&["broker", "cash-breakdown"]));
         let c = scope.spawn(|| sc::run(&["broker", "holdings"]));
-        let d = scope.spawn(|| sc::run(&["broker", "transactions"]));
+        let d = scope.spawn(fetch_transactions);
         let e = scope.spawn(|| sc::run(&["broker", "analytics"]));
         let f = scope.spawn(|| sc::run(&["broker", "price-alerts"]));
         ov = a.join().ok();
@@ -698,13 +856,25 @@ fn refresh_account(state: &Arc<Mutex<Shared>>) {
     }
     match &tx.data {
         Ok(v) => {
-            s.orders = PendingOrder::pending_from_transactions(sc::result(v));
-            let n = s.orders.len();
+            s.orders = PendingOrder::pending_from_transactions(v);
+            s.transactions = Transaction::list_from(v);
+            // Settled details are final; anything else may still change, so
+            // fetch it again.
+            let due: Vec<String> = s
+                .transactions
+                .iter()
+                .filter(|t| t.has_fill())
+                .filter(|t| !t.is_final() || !s.trade_details.contains_key(&t.id))
+                .filter(|t| !s.not_trades.contains(&t.id))
+                .map(|t| t.id.clone())
+                .collect();
+            s.detail_due = due;
+            let (n, all, due) = (s.orders.len(), s.transactions.len(), s.detail_due.len());
             s.push_log(
                 "broker.transactions",
                 tx.elapsed.as_millis(),
                 true,
-                format!("{n} working"),
+                format!("{n} working, {all} in history, {due} details to fetch"),
             );
         }
         Err(e) => s.push_log(

@@ -12,6 +12,7 @@ pub enum Act {
     ViewPortfolio,
     ViewLog,
     ViewRaw,
+    ViewHistory,
     PrevInstrument,
     NextInstrument,
     FocusSearch,
@@ -81,6 +82,7 @@ pub const BINDINGS: &[Binding] = &[
     b!(ViewPortfolio, Num3, Modifiers::NONE, "3", "Portfolio", NAV),
     b!(ViewLog, Num4, Modifiers::NONE, "4", "Log", NAV),
     b!(ViewRaw, Num5, Modifiers::NONE, "5", "Raw", NAV),
+    b!(ViewHistory, Num6, Modifiers::NONE, "6", "History", NAV),
     b!(
         PrevInstrument,
         ArrowUp,

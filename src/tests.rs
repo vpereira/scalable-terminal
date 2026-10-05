@@ -26,6 +26,8 @@ const CHART: &str = include_str!("../tests/fixtures/chart.json");
 const ANALYTICS: &str = include_str!("../tests/fixtures/analytics.json");
 const PREVIEW: &str = include_str!("../tests/fixtures/trade-preview.json");
 const CHART_YTD: &str = include_str!("../tests/fixtures/chart-ytd.json");
+const TRANSACTIONS_ALL: &str = include_str!("../tests/fixtures/transactions-all.json");
+const TRADE_DETAILS: &str = include_str!("../tests/fixtures/trade-details.json");
 
 #[test]
 fn iso8601_matches_unix_epoch() {
@@ -1850,6 +1852,7 @@ fn position_plan_measures_from_the_bid_and_the_outlay() {
     let p = PositionPlan::build(
         2.0,
         165.12,
+        0.0,
         170.68,
         &PlanContext {
             half_spread: 0.0022,
@@ -1892,6 +1895,7 @@ fn position_plan_shows_the_hurdle_on_a_small_loser() {
     let p = PositionPlan::build(
         20.0,
         1.312,
+        0.99,
         1.262,
         &PlanContext {
             half_spread: 0.0232,
@@ -1920,6 +1924,7 @@ fn position_plan_shows_the_hurdle_on_a_small_loser() {
         PositionPlan::build(
             0.0,
             1.3,
+            0.99,
             1.26,
             &PlanContext {
                 half_spread: 0.02,
@@ -1935,6 +1940,7 @@ fn position_plan_shows_the_hurdle_on_a_small_loser() {
         PositionPlan::build(
             20.0,
             1.3,
+            0.99,
             0.0,
             &PlanContext {
                 half_spread: 0.02,
@@ -1950,6 +1956,7 @@ fn position_plan_shows_the_hurdle_on_a_small_loser() {
         PositionPlan::build(
             20.0,
             1.3,
+            0.99,
             1.26,
             &PlanContext {
                 half_spread: 0.02,
@@ -1961,4 +1968,211 @@ fn position_plan_shows_the_hurdle_on_a_small_loser() {
         )
         .is_none()
     );
+}
+
+fn details() -> Vec<TradeDetail> {
+    let v: Value = serde_json::from_str(TRADE_DETAILS).expect("fixture parses");
+    v.as_array()
+        .expect("array of detail results")
+        .iter()
+        .map(|r| TradeDetail::from_json(r).expect("a trade"))
+        .collect()
+}
+
+fn cosco() -> Vec<TradeDetail> {
+    details()
+        .into_iter()
+        .filter(|d| d.isin == "CNE1000002S8")
+        .collect()
+}
+
+/// The sell fee is netted into the proceeds, so it only shows in the detail.
+#[test]
+fn trade_detail_reads_fill_fee_and_cash() {
+    let d = cosco();
+    let sell = d.iter().find(|d| d.side == "SELL").expect("the sale");
+    assert!(close(sell.filled, 20.0));
+    assert!(close(sell.average_price, 2.26));
+    assert!(close(sell.valuation, 45.2));
+    assert!(close(sell.fee, 0.99));
+    assert!(close(sell.tax, 0.0));
+    assert!(close(sell.total, 44.21));
+    assert_eq!(sell.venue, "SEIX");
+    assert_eq!(sell.filled_at, "2026-10-05T11:33:06");
+
+    let buy = d.iter().find(|d| d.id == "st43qrke4FExT2YKz1DMv6").unwrap();
+    assert!(close(buy.total, -22.49));
+    assert!(
+        close(buy.valuation + buy.fee, 22.49),
+        "a buy pays value plus fee"
+    );
+}
+
+/// COSCO: two small buys and one sale. +5.9% on price, a loss in cash.
+#[test]
+fn ledger_nets_fees_out_of_a_winning_price_move() {
+    let l = Ledger::build(&cosco());
+    assert_eq!(l.realized.len(), 1);
+    let r = &l.realized[0];
+    assert!(close(r.shares, 20.0));
+    assert!(close(r.buy_avg, 2.1345));
+    assert!(close(r.sell_avg, 2.26));
+    assert!((r.gross - 2.51).abs() < 1e-9);
+    assert!(
+        (r.fees - 2.97).abs() < 1e-9,
+        "two entry fees and one exit fee"
+    );
+    assert!((r.net - -0.46).abs() < 1e-9);
+    assert!((r.gross - r.fees - r.tax - r.net).abs() < 1e-9);
+    assert!((r.gross_pct() - 0.0588).abs() < 1e-3);
+    assert!(r.net_pct() < 0.0);
+    assert!(close(r.unmatched, 0.0));
+    assert_eq!(r.opened_at, "2026-09-17T13:50:27");
+    assert!(!l.open.contains_key("CNE1000002S8"), "flat after the sale");
+}
+
+/// The position plan used to charge one entry fee per position. Two buys
+/// paid two, which moved break even from 2.2335 to 2.283.
+#[test]
+fn position_plan_charges_every_entry_fee() {
+    let mut buys = cosco();
+    buys.retain(|d| d.side == "BUY");
+    let open = Ledger::build(&buys).open["CNE1000002S8"];
+    assert!(close(open.shares, 20.0));
+    assert!((open.fees - 1.98).abs() < 1e-9);
+
+    let p = PositionPlan::build(
+        20.0,
+        open.avg(),
+        open.fees,
+        2.26,
+        &PlanContext {
+            half_spread: 0.0,
+            sigma: 0.03,
+            stop_sigmas: 1.0,
+            target_sigmas: 2.0,
+            account: 500.0,
+        },
+    )
+    .expect("plan");
+    assert!((p.outlay - 44.67).abs() < 1e-9);
+    assert!(
+        (p.net_now - -0.46).abs() < 1e-9,
+        "the sale that actually happened"
+    );
+    assert!((p.break_even - 2.283).abs() < 1e-9);
+    assert!(!p.in_profit());
+}
+
+/// A storno reverses a booking. The reversed buy and its reversal drop out
+/// together, leaving only the shares really held.
+#[test]
+fn ledger_drops_a_reversed_trade_with_its_reversal() {
+    let d: Vec<TradeDetail> = details()
+        .into_iter()
+        .filter(|d| d.isin == "JP3228600007")
+        .collect();
+    assert_eq!(d.len(), 3);
+    assert!(d.iter().any(|d| d.is_cancellation));
+    let l = Ledger::build(&d);
+    let o = l.open["JP3228600007"];
+    assert!(close(o.shares, 2.0));
+    assert!(close(o.avg(), 16.95));
+    assert!(close(o.fees, 0.99));
+    assert!(l.realized.is_empty(), "a reversal is not a sale");
+}
+
+/// Ledger fees replace the one-order assumption only when the ledger
+/// reproduces what the broker says is held.
+#[test]
+fn entry_fees_fall_back_when_history_disagrees() {
+    let l = Ledger::build(&details());
+    let held = Holding {
+        isin: "JP3228600007".into(),
+        quantity: 2.0,
+        fifo_price: Some(16.95),
+        ..Default::default()
+    };
+    assert_eq!(l.entry_fees(&held), (0.99, true));
+
+    let more = Holding {
+        quantity: 5.0,
+        ..held.clone()
+    };
+    let (fee, known) = l.entry_fees(&more);
+    assert!(!known);
+    assert!(close(fee, 0.99), "5 x 16.95 is under the free threshold");
+
+    // Net is what a sale at valuation leaves after both fees.
+    let h = Holding {
+        valuation: Some(45.2),
+        quantity: 20.0,
+        fifo_price: Some(2.1345),
+        ..Default::default()
+    };
+    assert!((h.net_unrealized(1.98).unwrap() - -0.46).abs() < 1e-9);
+    assert!(
+        (h.unrealized_pct().unwrap() - 5.8796).abs() < 1e-3,
+        "the gross figure"
+    );
+}
+
+/// A sell with no buy in the history (transferred in, or older than it) is
+/// reported as unmatched rather than as a profit on zero cost.
+#[test]
+fn ledger_flags_a_sell_with_no_buy() {
+    let mut d = cosco();
+    d.retain(|d| d.side == "SELL");
+    let l = Ledger::build(&d);
+    let r = &l.realized[0];
+    assert!(close(r.unmatched, 20.0));
+    assert!(close(r.shares, 0.0));
+    assert!(close(r.net, 0.0));
+}
+
+/// The full history, every type. Working orders are read from the same rows.
+#[test]
+fn transactions_list_every_type() {
+    let v = envelope(TRANSACTIONS_ALL);
+    let r = sc::result(&v);
+    let t = Transaction::list_from(r);
+    assert_eq!(t.len(), 30);
+    assert!(Transaction::cursor(r).is_none(), "one page");
+
+    let deposit = t.iter().find(|t| t.cash_type == "DEPOSIT").unwrap();
+    assert!(!deposit.is_trade());
+    assert_eq!(deposit.label(), "DEPOSIT");
+
+    let fills: Vec<&Transaction> = t.iter().filter(|t| t.has_fill()).collect();
+    assert_eq!(fills.len(), 12, "10 buys, 1 storno, 1 sell");
+    assert!(fills.iter().all(|t| t.status == "SETTLED"));
+    assert!(
+        t.iter()
+            .filter(|t| t.status == "CANCELLED")
+            .all(|t| !t.has_fill())
+    );
+
+    let storno = t
+        .iter()
+        .find(|t| t.is_cancellation && t.is_trade())
+        .unwrap();
+    assert_eq!(storno.label(), "BUY storno");
+
+    let working = PendingOrder::pending_from_transactions(r);
+    assert_eq!(working.len(), 1);
+    assert_eq!(working[0].isin, "US60770K1079");
+}
+
+/// A booking whose side is neither buy nor sell must not become a sale.
+#[test]
+fn ledger_ignores_an_unknown_side() {
+    let mut d = cosco();
+    d.retain(|d| d.side == "BUY");
+    let mut odd = d[0].clone();
+    odd.id = "odd".into();
+    odd.side = "SAVINGS_PLAN".into();
+    d.push(odd);
+    let l = Ledger::build(&d);
+    assert!(l.realized.is_empty());
+    assert!(close(l.open["CNE1000002S8"].shares, 20.0));
 }
