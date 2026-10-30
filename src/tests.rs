@@ -2208,3 +2208,20 @@ fn break_even_splits_into_spread_price_and_fees() {
     let compounded = (1.0 + b.spread) * (1.0 + b.price) * (1.0 + b.fees) - 1.0;
     assert!((compounded - p.to_break_even).abs() < 1e-9);
 }
+
+/// A pending buy on an instrument not yet held comes back as a holding with
+/// zero shares. It is an order, not a position.
+#[test]
+fn holdings_skip_entries_with_only_a_pending_buy() {
+    let v = serde_json::json!({ "items": [
+        { "isin": "AU000000STO6", "name": "Santos", "quantity": 0,
+          "pending_quantity": 20, "blocked_quantity": 0, "fifo_price": null,
+          "valuation": null, "quote_mid_price": 5.824 },
+        { "isin": "CA53056H1047", "name": "Liberty Gold", "quantity": 20,
+          "pending_quantity": 0, "blocked_quantity": 0, "fifo_price": 1.312,
+          "valuation": 26.26, "quote_mid_price": 1.313 }
+    ]});
+    let h = Holding::list_from(&v);
+    assert_eq!(h.len(), 1);
+    assert_eq!(h[0].isin, "CA53056H1047");
+}

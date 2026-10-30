@@ -235,10 +235,18 @@ pub struct Holding {
 }
 
 impl Holding {
+    /// Only entries that hold shares. The broker also lists an instrument with
+    /// nothing but a pending buy (`quantity: 0`, `pending_quantity: 20`), which
+    /// is a working order, not a position.
     pub fn list_from(v: &Value) -> Vec<Holding> {
         pick(v, &["items"])
             .and_then(Value::as_array)
-            .map(|a| a.iter().map(Holding::one).collect())
+            .map(|a| {
+                a.iter()
+                    .map(Holding::one)
+                    .filter(|h| h.quantity > 1e-9)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
