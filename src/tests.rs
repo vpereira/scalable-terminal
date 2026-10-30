@@ -2176,3 +2176,35 @@ fn ledger_ignores_an_unknown_side() {
     assert!(l.realized.is_empty());
     assert!(close(l.open["CNE1000002S8"].shares, 20.0));
 }
+
+/// Liberty Gold, 2026-10-12: broker shows -2.36%, break even is +17% from the
+/// bid. The split must explain the whole gap.
+#[test]
+fn break_even_splits_into_spread_price_and_fees() {
+    let p = PositionPlan::build(
+        20.0,
+        1.312,
+        1.98,
+        1.248,
+        &PlanContext {
+            half_spread: 0.0258,
+            sigma: 0.04,
+            stop_sigmas: 1.0,
+            target_sigmas: 2.0,
+            account: 700.0,
+        },
+    )
+    .expect("plan");
+    assert!((p.break_even - 1.4605).abs() < 1e-9);
+    let b = p.break_even_steps(1.281);
+    assert!((b.bid - 1.248).abs() < 1e-9);
+    assert!((b.spread - 0.02644).abs() < 1e-4);
+    assert!(
+        (b.price - 0.0242).abs() < 1e-4,
+        "the broker's -2.36%, from mid"
+    );
+    assert!((b.fees - 0.1132).abs() < 1e-4);
+    assert!((b.fee_total - 2.97).abs() < 1e-9);
+    let compounded = (1.0 + b.spread) * (1.0 + b.price) * (1.0 + b.fees) - 1.0;
+    assert!((compounded - p.to_break_even).abs() < 1e-9);
+}

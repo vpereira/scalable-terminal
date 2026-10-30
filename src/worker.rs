@@ -23,6 +23,8 @@ pub const STATS_MAX_AGE_SECS: f64 = 86_400.0;
 pub const RATE_LIMIT_BACKOFF_MAX: Duration = Duration::from_secs(900);
 /// Gap between trade detail requests. The endpoint has no measured limit, so
 /// these go one at a time rather than fanned out like quotes.
+/// Shown in the top bar, which has little room. The full error is in the log.
+const SESSION_LOST: &str = "no session: run `sc login`, then Refresh all";
 pub const DETAIL_INTERVAL: Duration = Duration::from_secs(1);
 /// `broker transactions` defaults to 20 rows, which silently drops anything
 /// older, working orders included. Ask for the maximum and follow the cursor.
@@ -245,6 +247,8 @@ pub struct Shared {
     /// A chart request refused during backoff, re-issued once it lapses.
     pub deferred_chart: Option<(String, String)>,
     pub search_results: Vec<Value>,
+    /// What the last search returned when it was not a list of hits.
+    pub search_note: Option<String>,
     pub preview: Option<TradePreview>,
     pub preview_error: Option<String>,
     pub preview_pending: bool,
@@ -363,6 +367,15 @@ fn worker_loop(
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
 
+        if sc::AUTH_LOST.swap(false, Ordering::Relaxed) {
+            let mut s = state.lock().unwrap();
+            if s.session.take().is_some() || s.session_error.is_none() {
+                s.session_error = Some(SESSION_LOST.into());
+                s.push_log("session", 0, false, "authentication failed, session lost");
+            }
+            ctx.request_repaint();
+        }
+
         backfill_one(&state, &ctx);
         fetch_detail_one(&state, &ctx);
 
@@ -431,6 +444,8 @@ impl Shared {
 fn handle(state: &Arc<Mutex<Shared>>, cmd: Cmd) {
     match cmd {
         Cmd::RefreshAll => {
+            // Re-check the session, so a fresh `sc login` is picked up here.
+            check_session(state);
             refresh_account(state);
             refresh_watchlist(state);
             let list = state.lock().unwrap().poll_targets();
@@ -640,7 +655,7 @@ fn check_session(state: &Arc<Mutex<Shared>>) {
                 }
                 sc::ScErrorKind::Auth => {
                     s.session = None;
-                    s.session_error = Some(format!("{e} — run `sc login`"));
+                    s.session_error = Some(SESSION_LOST.into());
                 }
                 _ => {
                     s.session_error = Some(e.to_string());
@@ -1614,6 +1629,10 @@ fn do_search(state: &Arc<Mutex<Shared>>, q: &str) {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
+            s.search_note = s
+                .search_results
+                .is_empty()
+                .then(|| format!("no instrument matches \"{q}\""));
             for r in &s.search_results.clone() {
                 if let (Some(isin), Some(name)) =
                     (sc::str_at(r, &["isin"]), sc::str_at(r, &["name"]))
@@ -1629,12 +1648,16 @@ fn do_search(state: &Arc<Mutex<Shared>>, q: &str) {
                 format!("{q}: {n} hits"),
             );
         }
-        Err(e) => s.push_log(
-            "broker.search",
-            call.elapsed.as_millis(),
-            false,
-            format!("{q}: {e}"),
-        ),
+        Err(e) => {
+            s.search_results.clear();
+            s.search_note = Some(format!("search failed: {e}"));
+            s.push_log(
+                "broker.search",
+                call.elapsed.as_millis(),
+                false,
+                format!("{q}: {e}"),
+            );
+        }
     }
 }
 
@@ -1682,7 +1705,7 @@ fn do_preview(state: &Arc<Mutex<Shared>>, intent: &TradeIntent) {
                 s.session_error = Some("Mac is locked, unlock it to resume".into());
             } else if e.kind == sc::ScErrorKind::Auth {
                 s.session = None;
-                s.session_error = Some(format!("{e} — run `sc login`"));
+                s.session_error = Some(SESSION_LOST.into());
             }
             s.preview_error = Some(e.to_string());
             s.push_log(

@@ -192,6 +192,27 @@ impl App {
         }
     }
 
+    /// Why the ticket cannot be previewed yet. The broker rejects a zero price
+    /// with an opaque input error, so catch it here and say what is missing.
+    fn ticket_problem(&self) -> Option<&'static str> {
+        let size = if self.size_by_shares || self.side == Side::Sell {
+            self.shares
+        } else {
+            self.amount
+        };
+        if self.selected.is_none() {
+            Some("select an instrument")
+        } else if size <= 0.0 {
+            Some("set a size")
+        } else if self.order_type == OrderType::Limit && self.limit_price <= 0.0 {
+            Some("set a limit price: type one or press bid, mid or ask")
+        } else if self.order_type == OrderType::Stop && self.stop_price <= 0.0 {
+            Some("set a stop price")
+        } else {
+            None
+        }
+    }
+
     fn intent(&self) -> TradeIntent {
         TradeIntent {
             isin: self.selected.clone().unwrap_or_default(),
@@ -546,7 +567,7 @@ impl App {
             Act::CyclePrice => self.cycle_price(),
             Act::Preview => {
                 // Phase one only. Placing an order still needs the dialog.
-                if self.selected.is_some() {
+                if self.ticket_problem().is_none() {
                     self.confirm_typed.clear();
                     self.accept_unsuitable = false;
                     let _ = self.io.tx.send(Cmd::PreviewTrade(self.intent()));
@@ -1003,7 +1024,18 @@ impl App {
             }
             ui.separator();
 
-            let results = { self.io.state.lock().unwrap().search_results.clone() };
+            let (results, note) = {
+                let s = self.io.state.lock().unwrap();
+                (s.search_results.clone(), s.search_note.clone())
+            };
+            if let Some(n) = note {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(n).color(AMBER));
+                    if ui.small_button("x").clicked() {
+                        self.io.state.lock().unwrap().search_note = None;
+                    }
+                });
+            }
             if !results.is_empty() {
                 let label = format!("Search results ({})", results.len());
                 let (_, clear) = section(ui, &label, Some("clear"), |ui| {
@@ -1618,6 +1650,25 @@ impl App {
                             .monospace()
                             .strong(),
                     );
+                    let steps = q.mid.map(|m| p.break_even_steps(m));
+                    let why = match steps {
+                        Some(b) => format!(
+                            "bid {:.4} -> mid {:.4}   {:+.2}%  spread\n\
+                             mid -> avg cost {:.4}   {:+.2}%  price\n\
+                             avg cost -> break even {:.4}   {:+.2}%  fees {:.2} EUR\n\
+                             total {:+.2}%",
+                            b.bid,
+                            b.mid,
+                            b.spread * 100.0,
+                            b.cost,
+                            b.price * 100.0,
+                            p.break_even,
+                            b.fees * 100.0,
+                            b.fee_total,
+                            p.to_break_even * 100.0,
+                        ),
+                        None => "no mid quote to split the distance".into(),
+                    };
                     ui.label(
                         RichText::new(if p.to_break_even > 0.0 {
                             format!("{:+.2}% away", p.to_break_even * 100.0)
@@ -1626,7 +1677,8 @@ impl App {
                         })
                         .color(if p.to_break_even > 0.0 { AMBER } else { GREEN })
                         .monospace(),
-                    );
+                    )
+                    .on_hover_text(why);
                     ui.label(RichText::new("bid must reach this").color(DIM).small());
                     ui.end_row();
 
@@ -2213,6 +2265,7 @@ impl App {
             self.plan(ui, &isin, q.as_ref());
 
             let pending = { self.io.state.lock().unwrap().preview_pending };
+            let problem = self.ticket_problem();
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let label = if self.side == Side::Buy {
@@ -2221,7 +2274,10 @@ impl App {
                     "Preview SELL"
                 };
                 if ui
-                    .add_enabled(!pending, egui::Button::new(RichText::new(label).strong()))
+                    .add_enabled(
+                        !pending && problem.is_none(),
+                        egui::Button::new(RichText::new(label).strong()),
+                    )
                     .clicked()
                 {
                     self.confirm_typed.clear();
@@ -2230,6 +2286,9 @@ impl App {
                 }
                 if pending {
                     ui.spinner();
+                }
+                if let Some(p) = problem {
+                    ui.label(RichText::new(p).color(AMBER).small());
                 }
             });
 
@@ -2261,8 +2320,13 @@ impl App {
         let (Some(sigma), Some(q)) = (sigma, q) else {
             return;
         };
-        // Buying lifts the ask; selling is an exit and has no plan to make.
-        let Some(entry) = q.ask.or(q.mid) else { return };
+        // Buying lifts the ask, or pays the limit if one is set; selling is an
+        // exit and has no plan to make.
+        let limit = (self.order_type == OrderType::Limit && self.limit_price > 0.0)
+            .then_some(self.limit_price);
+        let Some(entry) = limit.or(q.ask).or(q.mid) else {
+            return;
+        };
         if self.side != Side::Buy {
             return;
         }

@@ -1395,6 +1395,18 @@ impl TradePlan {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BreakEvenSteps {
+    pub bid: f64,
+    pub mid: f64,
+    pub cost: f64,
+    pub spread: f64,
+    pub price: f64,
+    pub fees: f64,
+    /// Entry fees paid plus the exit fee at break even.
+    pub fee_total: f64,
+}
+
 /// The same questions as `TradePlan`, asked of a position you already hold.
 ///
 /// The difference matters: the entry fee is spent, the cost basis is fixed, and
@@ -1485,6 +1497,24 @@ impl PositionPlan {
             },
             reward_from_here: at_target - net_now,
         })
+    }
+
+    /// The distance to break even split into its parts, each as a move from
+    /// the price before it: bid to mid (spread), mid to average cost (price),
+    /// average cost to break even (fees). They compound to `to_break_even`.
+    pub fn break_even_steps(&self, mid: f64) -> BreakEvenSteps {
+        let bid = self.break_even / (1.0 + self.to_break_even);
+        let step = |from: f64, to: f64| if from > 0.0 { to / from - 1.0 } else { 0.0 };
+        BreakEvenSteps {
+            bid,
+            mid,
+            cost: self.cost,
+            spread: step(bid, mid),
+            price: step(mid, self.cost),
+            fees: step(self.cost, self.break_even),
+            fee_total: self.outlay - self.shares * self.cost
+                + fee_for(self.shares * self.break_even),
+        }
     }
 
     /// True once selling would return more than the position cost.

@@ -67,6 +67,11 @@ pub struct Call {
     pub data: Result<Value, ScError>,
 }
 
+/// Set by any call that fails on authentication, so the session loss shows
+/// in the top bar whichever call hit it. Only startup checked before, so an
+/// expiry mid-session left every panel silently empty.
+pub static AUTH_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn run(args: &[&str]) -> Call {
     let mut argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     if !argv.iter().any(|a| a == "--json") {
@@ -100,6 +105,10 @@ pub fn run(args: &[&str]) -> Call {
             (body, parsed)
         }
     };
+
+    if data.as_ref().is_err_and(|e| e.kind == ScErrorKind::Auth) {
+        AUTH_LOST.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 
     Call {
         argv,
