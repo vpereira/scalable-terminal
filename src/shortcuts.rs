@@ -37,7 +37,7 @@ pub enum Act {
     CyclePrice,
     Preview,
     CancelOrder,
-    ArmTrail,
+    TrailSelection,
 }
 
 pub struct Binding {
@@ -206,11 +206,11 @@ pub const BINDINGS: &[Binding] = &[
         ORDERS
     ),
     b!(
-        ArmTrail,
+        TrailSelection,
         T,
         Modifiers::SHIFT,
         "Shift T",
-        "Arm a trail on the selection",
+        "Ticket: trailing stop on the free position",
         ORDERS
     ),
 ];
@@ -219,16 +219,10 @@ pub const GROUPS: &[&str] = &[NAV, DATA, CHART, TICKET, ORDERS];
 
 /// Actions with no binding, and the reason. Shown in the help window so the
 /// absence reads as a decision rather than an oversight.
-pub const UNBOUND: &[(&str, &str)] = &[
-    (
-        "Submit an order",
-        "stays behind typing CONFIRM, so a stray keypress can never fill",
-    ),
-    (
-        "Move a trailing stop",
-        "cancels a live stop, so it costs a deliberate click",
-    ),
-];
+pub const UNBOUND: &[(&str, &str)] = &[(
+    "Submit an order",
+    "stays behind typing CONFIRM, so a stray keypress can never fill",
+)];
 
 /// Which action, if any, was pressed this frame.
 ///

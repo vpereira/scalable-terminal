@@ -208,8 +208,22 @@ impl App {
             Some("set a limit price: type one or press bid, mid or ask")
         } else if self.order_type == OrderType::Stop && self.stop_price <= 0.0 {
             Some("set a stop price")
+        } else if self.order_type == OrderType::TrailingStop && self.side != Side::Sell {
+            Some("trailing stops are sell only")
+        } else if self.order_type == OrderType::TrailingStop && !trail_venue_ok(&self.venue) {
+            Some("trailing stops: EIX or gettex only")
+        } else if self.order_type == OrderType::TrailingStop {
+            self.trail().problem()
         } else {
             None
+        }
+    }
+
+    fn trail(&self) -> TrailDistance {
+        if self.trail_percent {
+            TrailDistance::Percent(self.trail_distance)
+        } else {
+            TrailDistance::Amount(self.trail_distance)
         }
     }
 
@@ -222,6 +236,7 @@ impl App {
             shares: (self.size_by_shares || self.side == Side::Sell).then_some(self.shares),
             limit_price: (self.order_type == OrderType::Limit).then_some(self.limit_price),
             stop_price: (self.order_type == OrderType::Stop).then_some(self.stop_price),
+            trail: (self.order_type == OrderType::TrailingStop).then(|| self.trail()),
             venue: (!self.venue.trim().is_empty()).then(|| self.venue.trim().to_string()),
         }
     }
@@ -588,25 +603,21 @@ impl App {
                     let _ = self.io.tx.send(Cmd::CancelOrder(id));
                 }
             }
-            Act::ArmTrail => {
+            Act::TrailSelection => {
+                // Fills the ticket only. Placing it still goes through preview
+                // and the confirm dialog.
                 if let Some(isin) = self.selected.clone() {
-                    let held = {
+                    let free = {
                         let s = self.io.state.lock().unwrap();
                         s.holdings
                             .iter()
-                            .any(|h| h.isin == isin && h.quantity > 0.0)
+                            .find(|h| h.isin == isin)
+                            .map(|h| h.free_quantity(&s.orders))
                     };
-                    if held {
-                        let distance = if self.trail_percent {
-                            self.trail_distance / 100.0
-                        } else {
-                            self.trail_distance
-                        };
-                        let _ = self.io.tx.send(Cmd::ArmTrail {
-                            isin,
-                            distance,
-                            percent: self.trail_percent,
-                        });
+                    if let Some(free) = free.filter(|f| *f > 0.0) {
+                        self.side = Side::Sell;
+                        self.order_type = OrderType::TrailingStop;
+                        self.shares = free;
                     }
                 }
             }
@@ -1416,7 +1427,6 @@ impl App {
                     self.position_plan(ui);
                     self.orders(ui);
                     self.alerts(ui);
-                    self.trails(ui);
                     self.ticket(ui);
                 });
             });
@@ -1895,183 +1905,6 @@ impl App {
         }
     }
 
-    /// Trailing stops. `sc` has no trailing order type, so a trail here is a
-    /// suggestion plus a button. Nothing moves without an explicit confirmation.
-    fn trails(&mut self, ui: &mut egui::Ui) {
-        let (trails, orders, quotes, gap, err) = {
-            let s = self.io.state.lock().unwrap();
-            (
-                s.trails.clone(),
-                s.orders.clone(),
-                s.quotes.clone(),
-                s.trail_gap.clone(),
-                s.trail_error.clone(),
-            )
-        };
-
-        let mut ratchet: Option<String> = None;
-        let mut disarm: Option<String> = None;
-
-        section(ui, "Trailing stops", None, |ui| {
-            if let Some(isin) = &gap {
-                ui.label(
-                    RichText::new(format!("{isin} HAS NO STOP RIGHT NOW"))
-                        .color(Color32::WHITE)
-                        .background_color(RED)
-                        .strong(),
-                );
-                ui.label(
-                    RichText::new(
-                        "the old stop was cancelled and the replacement is not placed yet",
-                    )
-                    .color(AMBER)
-                    .small(),
-                );
-            }
-            if let Some(e) = &err {
-                ui.label(RichText::new(e).color(RED));
-            }
-
-            // Arm a trail on whatever is selected, if it is actually held.
-            if let Some(isin) = self.selected.clone() {
-                let held = {
-                    let s = self.io.state.lock().unwrap();
-                    s.holdings
-                        .iter()
-                        .any(|h| h.isin == isin && h.quantity > 0.0)
-                };
-                if held && !trails.iter().any(|t| t.isin == isin) {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("arm").color(DIM));
-                        ui.add(
-                            egui::DragValue::new(&mut self.trail_distance)
-                                .speed(0.1)
-                                .range(0.1..=90.0)
-                                .suffix(if self.trail_percent { " %" } else { "" }),
-                        );
-                        ui.selectable_value(&mut self.trail_percent, true, "%");
-                        ui.selectable_value(&mut self.trail_percent, false, "abs");
-                        if ui.button("Arm trail").clicked() {
-                            let distance = if self.trail_percent {
-                                self.trail_distance / 100.0
-                            } else {
-                                self.trail_distance
-                            };
-                            let _ = self.io.tx.send(Cmd::ArmTrail {
-                                isin: isin.clone(),
-                                distance,
-                                percent: self.trail_percent,
-                            });
-                        }
-                    });
-                }
-            }
-
-            if trails.is_empty() {
-                ui.label(RichText::new("none armed").color(DIM));
-            }
-
-            for t in &trails {
-                let resting = orders.iter().find(|o| {
-                    o.isin == t.isin
-                        && o.side.eq_ignore_ascii_case("SELL")
-                        && o.stop_price.is_some()
-                });
-                let current = resting.and_then(|o| o.stop_price);
-                let mid = quotes.get(&t.isin).and_then(|q| q.mid);
-                let suggested = t.suggested_stop();
-                let move_now = t.should_move(current);
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&t.isin).monospace().strong());
-                    ui.label(
-                        RichText::new(if t.percent {
-                            format!("trail {:.2}%", t.distance * 100.0)
-                        } else {
-                            format!("trail {:.4}", t.distance)
-                        })
-                        .color(DIM),
-                    );
-                    if ui.small_button("disarm").clicked() {
-                        disarm = Some(t.isin.clone());
-                    }
-                });
-
-                egui::Grid::new(format!("trail_{}", t.isin))
-                    .num_columns(2)
-                    .spacing([14.0, 2.0])
-                    .show(ui, |ui| {
-                        let row = |ui: &mut egui::Ui, k: &str, v: RichText| {
-                            ui.label(RichText::new(k).color(DIM).small());
-                            ui.label(v);
-                            ui.end_row();
-                        };
-                        row(
-                            ui,
-                            "high water",
-                            RichText::new(format!("{:.4}", t.high_water)).monospace(),
-                        );
-                        row(ui, "price", RichText::new(num(mid, 4)).monospace());
-                        row(
-                            ui,
-                            "resting stop",
-                            match current {
-                                Some(c) => RichText::new(format!("{c:.4}")).monospace(),
-                                None => RichText::new("NONE").color(RED).monospace().strong(),
-                            },
-                        );
-                        row(
-                            ui,
-                            "suggested",
-                            RichText::new(num(suggested, 4))
-                                .monospace()
-                                .color(if move_now { AMBER } else { DIM }),
-                        );
-                        if let Some(c) = mid.and_then(|m| t.cushion(m, current)) {
-                            row(
-                                ui,
-                                "cushion",
-                                RichText::new(format!("{:.2}%", c * 100.0))
-                                    .monospace()
-                                    .color(if c < 0.01 { RED } else { DIM }),
-                            );
-                        }
-                    });
-
-                if move_now {
-                    let label = match current {
-                        Some(_) => "Move stop up",
-                        None => "Place stop",
-                    };
-                    if ui
-                        .add(egui::Button::new(RichText::new(label).strong()))
-                        .on_hover_text(
-                            "cancels the resting stop, then previews the replacement. \n\
-                         the position is unprotected until you confirm it.",
-                        )
-                        .clicked()
-                    {
-                        ratchet = Some(t.isin.clone());
-                    }
-                } else {
-                    ui.label(
-                        RichText::new("stop is where it should be")
-                            .color(DIM)
-                            .small(),
-                    );
-                }
-            }
-        });
-
-        if let Some(isin) = ratchet {
-            let _ = self.io.tx.send(Cmd::RatchetTrail { isin });
-        }
-        if let Some(isin) = disarm {
-            let _ = self.io.tx.send(Cmd::DisarmTrail(isin));
-        }
-    }
-
     fn ticket(&mut self, ui: &mut egui::Ui) {
         section(ui, "Order ticket", None, |ui| {
             let isin = self.selected.clone().unwrap_or_default();
@@ -2122,7 +1955,14 @@ impl App {
                 ui.selectable_value(&mut self.order_type, OrderType::Market, "Market");
                 ui.selectable_value(&mut self.order_type, OrderType::Limit, "Limit");
                 ui.selectable_value(&mut self.order_type, OrderType::Stop, "Stop");
+                ui.add_enabled_ui(self.side == Side::Sell, |ui| {
+                    ui.selectable_value(&mut self.order_type, OrderType::TrailingStop, "Trail")
+                        .on_disabled_hover_text("sell only");
+                });
             });
+            if self.side == Side::Buy && self.order_type == OrderType::TrailingStop {
+                self.order_type = OrderType::Market;
+            }
 
             if self.side == Side::Sell {
                 self.size_by_shares = true;
@@ -2251,6 +2091,25 @@ impl App {
                             .range(0.0..=1e9),
                     );
                 });
+            }
+
+            if self.order_type == OrderType::TrailingStop {
+                ui.horizontal(|ui| {
+                    ui.label("Trail");
+                    ui.add(
+                        egui::DragValue::new(&mut self.trail_distance)
+                            .speed(0.1)
+                            .range(0.0..=1e9)
+                            .suffix(if self.trail_percent { " %" } else { " €" }),
+                    );
+                    ui.selectable_value(&mut self.trail_percent, true, "%");
+                    ui.selectable_value(&mut self.trail_percent, false, "€");
+                });
+                ui.label(
+                    RichText::new("broker side, EIX and gettex only")
+                        .color(DIM)
+                        .small(),
+                );
             }
 
             ui.horizontal(|ui| {
@@ -3927,6 +3786,19 @@ impl App {
                             ui.end_row();
                         };
                         row(ui, "Shares", num(p.shares, 6));
+                        if !p.trail_type.is_empty() || p.trail_offset.is_some() {
+                            row(
+                                ui,
+                                "Trail",
+                                format!(
+                                    "{} {} {} ({})",
+                                    p.trail_type,
+                                    num(p.trail_offset, 4),
+                                    p.trail_unit,
+                                    p.trail_execution
+                                ),
+                            );
+                        }
                         row(
                             ui,
                             "Est. volume",

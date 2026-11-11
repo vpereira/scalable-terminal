@@ -113,7 +113,6 @@ Dependencies: eframe, egui, egui_extras, egui_plot, serde, serde_json, image.
 No database. Broker state is refetched from `sc` on every run. What is written lives as JSON files in `~/.config/scalable-terminal/`:
 
 * `workspace.json` holds your custom lists and their ordering, the tags you apply to instruments, and interface preferences: refresh interval, chart style and timeframe, moving average toggles, bar density and the ranking column.
-* `trails.json` holds the high water mark of each armed trailing stop. That is the one piece of a trail that cannot be recovered from the broker, so it has to survive a restart.
 * `trades.json` caches the detail of every settled trade, raw as the broker returned it. A settled booking never changes, and fetching the detail costs one call per trade, so it is fetched once. The only broker data kept on disk.
 
 Delete any file and the app starts fresh with defaults.
@@ -191,7 +190,7 @@ Writes are debounced, so dragging the interval does not hammer the disk, and the
 
 Switching lists prices whatever is newly on screen straight away rather than waiting for the next poll, and instrument names are remembered from every endpoint that reports one, so a row that has no quote yet still says what it is and shows a waiting marker instead of a line of dashes.
 
-Right column: cash and buying power, positions with cost basis and unrealised profit against a live mid, working orders with cancel, trailing stops, order ticket.
+Right column: cash and buying power, positions with cost basis and unrealised profit against a live mid, working orders with cancel, order ticket.
 
 Main area:
 
@@ -205,9 +204,9 @@ Main area:
 
 `?` opens a window listing every binding, generated from the same table the handler uses, so the list cannot drift from what actually works. The top bar carries a `?` button for the same thing.
 
-Navigation is `1` to `6` for the views, arrows for the instrument, `/` and `A` for the search and add fields. `R` refreshes, `Space` pauses polling. On the chart, `[` and `]` step the timeframe, `C` switches candles and line, `Z` `X` `V` toggle the moving averages. On the ticket, `B` and `S` set the side, `M` `L` `T` the order type, `P` cycles the limit through bid, mid and ask, and `Enter` previews.
+Navigation is `1` to `6` for the views, arrows for the instrument, `/` and `A` for the search and add fields. `R` refreshes, `Space` pauses polling. On the chart, `[` and `]` step the timeframe, `C` switches candles and line, `Z` `X` `V` toggle the moving averages. On the ticket, `B` and `S` set the side, `M` `L` `T` the order type, `P` cycles the limit through bid, mid and ask, `Shift T` sets up a trailing stop on the free part of the selected position, and `Enter` previews.
 
-Submitting an order has no shortcut and will not get one. The same goes for moving a trailing stop, which cancels a live stop. Both stay behind a deliberate click, and the help window says so rather than leaving the omission to look like an oversight.
+Submitting an order has no shortcut and will not get one. It stays behind a deliberate click, and the help window says so rather than leaving the omission to look like an oversight.
 
 Shortcuts are suppressed while a text field has focus. Escape leaves the field.
 
@@ -310,23 +309,21 @@ Broker side alerts, from `broker price-alerts`. Select an instrument, set a pric
 
 Direction is not a choice. The broker derives UP or DOWN from where the price sits relative to the market when the alert is created, so the panel shows which way it will fire before you commit rather than offering a control that does nothing.
 
-Unlike trailing stops, these live at the broker, so they work with the terminal closed.
+These live at the broker, so they work with the terminal closed.
 
 ## Trailing stops
 
 A trailing stop follows the price up and never moves down, so it locks in gains while leaving room for the trend to continue.
 
-The CLI cannot place one, so the app imitates it. You arm a trail on a position, as a percentage or a fixed amount. The app then tracks the highest price seen and works out where the stop belongs. When the resting stop falls too far behind, a button appears. Press it and the app cancels the old stop and previews a new one higher up, through the normal confirm dialog.
+Native since `sc` 1.3.0: `broker trade sell --order-type trailing-stop` with `--trail-amount` (EUR) or `--trail-percent`. The broker moves the stop, so it works with the terminal closed and there is no unprotected window.
 
-Nothing moves without you pressing that button.
+* Pick Trail in the ticket, or press `Shift T` on a held instrument to fill the ticket with the free quantity.
+* Distance in percent or EUR. The broker's floor on a percentage is 0.5%, checked before preview.
+* Sell only. EIX and gettex only: venue default, gettex/MUNC or eix/SEIX, checked before preview.
+* Needs `sc` 1.3.0 or later. Older versions reject the order type.
+* The confirm dialog shows the trail as the broker read it back from phase one.
 
-Three things to know:
-
-* Between cancelling the old stop and confirming the new one, the position has no stop at all. The broker forces that order, because the shares are tied up by the resting order. The panel shows it in red for as long as it lasts.
-* It only follows while the app is running and the Mac is unlocked. Otherwise the stop simply stays where it was last placed.
-* Small moves are ignored. Each adjustment costs three calls and opens that gap, so the button only appears once the improvement is worth at least a tenth of a percent.
-
-The broker's own order records carry a `trailing_stop_info` field, so the backend supports trailing stops natively. The CLI just has no flag to set one, which is [issue #39](https://github.com/ScalableCapital/scalable-cli/issues/39) upstream. If that lands, all of the above collapses into a single order and the gap disappears.
+Earlier versions imitated a trail by cancelling and replacing a plain stop. That is gone. A leftover `~/.config/scalable-terminal/trails.json` is ignored and can be deleted.
 
 ## Data limits
 
@@ -383,7 +380,7 @@ This exists because the app cannot be brought to the foreground from a script on
 ## Code
 
 * `src/sc.rs` wraps the CLI. Envelope parsing, exit codes, rate limit and device lock classification, tolerant path lookup.
-* `src/model.rs` types the payloads and holds derived logic: candle aggregation, moving averages, free to sell quantity, trailing stop arithmetic.
+* `src/model.rs` types the payloads and holds derived logic: candle aggregation, moving averages, free to sell quantity.
 * `src/worker.rs` is the background thread. Quote fan out, caches, rate limit pause, two phase order flow.
 * `src/app.rs` is the interface.
 * `src/tests.rs` is the suite above.
@@ -394,4 +391,4 @@ Verified against a live account: every read shape, quote polling and its timings
 
 Error handling has been exercised in production rather than only in tests: backend rate limits and the recovery after them, the Secure Enclave refusing to sign while the Mac is locked, and the broker declining a watchlist add inside an `ok` response.
 
-A limit sell has filled and settled, and its fee read back from the trade detail. Not yet exercised: stop and market orders, a taxed sale, the trailing stop ratchet, and accounts unlike the one it was built against, which has five positions in a single currency, no crypto and no savings plans.
+A limit sell has filled and settled, and its fee read back from the trade detail. Not yet exercised: stop, trailing stop and market orders, a taxed sale, and accounts unlike the one it was built against, which has five positions in a single currency, no crypto and no savings plans.

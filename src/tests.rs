@@ -664,111 +664,89 @@ fn derivatives_page_extracts_risk_metrics() {
     assert!(p.items.iter().all(|d| !d.isin.is_empty()));
 }
 
-/// A trailing stop must never loosen. The high water mark only rises, so the
-/// suggested stop can only rise with it.
+/// A trailing stop goes out as one native order with exactly one distance flag.
 #[test]
-fn trail_high_water_and_stop_only_rise() {
-    let mut t = Trail::new("X", 0.03, true, 190.0);
-    assert!(close(t.high_water, 190.0));
-    assert!(close(t.suggested_stop().unwrap(), 184.3));
+fn trailing_stop_argv_carries_one_distance() {
+    use crate::worker::TradeIntent;
+    let mut intent = TradeIntent {
+        isin: "X".into(),
+        side: Side::Sell,
+        order_type: OrderType::TrailingStop,
+        amount: None,
+        shares: Some(10.0),
+        limit_price: None,
+        stop_price: None,
+        trail: Some(TrailDistance::Percent(3.0)),
+        venue: None,
+    };
+    let a = intent.argv(None, false);
+    let at = |k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].as_str());
+    assert_eq!(at("--order-type"), Some("trailing-stop"));
+    assert_eq!(at("--trail-percent"), Some("3"));
+    assert!(!a.iter().any(|x| x == "--trail-amount"));
+    assert!(
+        !a.iter()
+            .any(|x| x == "--stop-price" || x == "--limit-price")
+    );
 
-    assert!(t.observe(194.20), "a higher mid advances the mark");
-    assert!(close(t.high_water, 194.20));
-    assert!(close(t.suggested_stop().unwrap(), 188.374));
-
-    // Falling prices change nothing at all.
-    for p in [191.0, 185.0, 150.0, 1.0] {
-        assert!(!t.observe(p), "{p} must not move the mark");
-        assert!(close(t.high_water, 194.20));
-        assert!(close(t.suggested_stop().unwrap(), 188.374));
-    }
-
-    // Garbage input must not poison the mark.
-    assert!(!t.observe(f64::NAN));
-    assert!(!t.observe(f64::INFINITY));
-    assert!(close(t.high_water, 194.20));
+    intent.trail = Some(TrailDistance::Amount(2.5));
+    let a = intent.argv(Some("cid"), false);
+    let at = |k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].as_str());
+    assert_eq!(at("--trail-amount"), Some("2.5"));
+    assert!(!a.iter().any(|x| x == "--trail-percent"));
+    assert_eq!(at("--confirm"), Some("cid"));
 }
 
-/// Rounding is downward, so it can only ever move the stop further from the
-/// market. Rounding up could trigger an exit that should not have happened.
+/// The broker refuses a percentage under 0.5 and any non-positive amount.
+/// Catch it before phase one rather than surfacing an opaque input error.
 #[test]
-fn trail_rounds_the_stop_away_from_the_market() {
-    let t = Trail::new("X", 0.037, true, 123.4567);
-    let raw = 123.4567 * (1.0 - 0.037);
-    let s = t.suggested_stop().unwrap();
-    assert!(s <= raw, "rounded stop {s} must not exceed raw {raw}");
-    assert!(raw - s < 1e-4);
-
-    let abs = Trail::new("X", 2.5, false, 100.0);
-    assert!(close(abs.suggested_stop().unwrap(), 97.5));
-}
-
-/// Replacing costs three calls and opens an unprotected window, so a trail must
-/// not churn for a rounding error.
-#[test]
-fn trail_only_moves_for_a_worthwhile_improvement() {
-    let mut t = Trail::new("X", 0.03, true, 200.0);
-    let stop = t.suggested_stop().unwrap();
-    assert!(close(stop, 194.0));
-
-    // No resting stop at all: always worth placing one.
-    assert!(t.should_move(None));
-
-    // Already at the suggestion: nothing to do.
-    assert!(!t.should_move(Some(stop)));
-
-    // A resting stop above the suggestion is never dragged back down.
-    assert!(!t.should_move(Some(stop + 5.0)));
-
-    // Just under the minimum step is not worth the exposure.
-    let tiny = stop - stop * (t.min_step * 0.5);
-    assert!(!t.should_move(Some(tiny)));
-
-    // A full step is.
-    let worth = stop - stop * (t.min_step * 2.0);
-    assert!(t.should_move(Some(worth)));
-
-    // After a real rally the old stop is clearly stale.
-    t.observe(240.0);
-    assert!(t.should_move(Some(stop)));
-    assert!(close(t.suggested_stop().unwrap(), 232.8));
-}
-
-/// A misconfigured trail must produce no suggestion rather than a nonsense one.
-#[test]
-fn trail_rejects_impossible_distances() {
-    for (d, pct) in [
-        (0.0, true),
-        (-0.05, true),
-        (1.0, true),
-        (1.5, true),
-        (0.0, false),
+fn trail_distance_enforces_broker_minimums() {
+    assert!(TrailDistance::Percent(0.5).problem().is_none());
+    assert!(TrailDistance::Percent(5.0).problem().is_none());
+    assert!(TrailDistance::Amount(0.01).problem().is_none());
+    for bad in [
+        TrailDistance::Percent(0.49),
+        TrailDistance::Percent(0.0),
+        TrailDistance::Percent(100.0),
+        TrailDistance::Percent(f64::NAN),
+        TrailDistance::Amount(0.0),
+        TrailDistance::Amount(-1.0),
+        TrailDistance::Amount(f64::NAN),
     ] {
-        let t = Trail::new("X", d, pct, 100.0);
-        assert!(!t.valid(), "distance {d} percent {pct} must be rejected");
-        assert!(t.suggested_stop().is_none());
-        assert!(!t.should_move(None));
+        assert!(bad.problem().is_some(), "{bad:?} must be rejected");
     }
-
-    // An absolute distance wider than the price leaves no stop to place.
-    let t = Trail::new("X", 150.0, false, 100.0);
-    assert!(t.valid());
-    assert!(t.suggested_stop().is_none());
-    assert!(!t.should_move(None));
 }
 
-/// The cushion is what the user actually reads: how far price can fall before
-/// the stop is hit.
+/// Only EIX and gettex take trailing stops; anything else is refused at phase one.
 #[test]
-fn trail_cushion_measures_distance_to_the_stop() {
-    let t = Trail::new("X", 0.03, true, 200.0);
-    // Against a resting stop, not the suggestion.
-    let c = t.cushion(200.0, Some(190.0)).unwrap();
-    assert!((c - 0.05).abs() < 1e-9);
-    // With no resting stop it falls back to where the stop would go.
-    let c = t.cushion(200.0, None).unwrap();
-    assert!((c - 0.03).abs() < 1e-9);
-    assert!(t.cushion(0.0, Some(190.0)).is_none());
+fn trail_venue_is_eix_or_gettex() {
+    for ok in ["", "  ", "gettex", "MUNC", "eix", "SEIX"] {
+        assert!(trail_venue_ok(ok), "{ok:?}");
+    }
+    for bad in ["xetra", "XETR", "tradegate"] {
+        assert!(!trail_venue_ok(bad), "{bad:?}");
+    }
+}
+
+/// The trail is part of the disclosure contract, so it must be read back from
+/// the preview and not just echoed from what was typed.
+#[test]
+fn preview_reads_the_trail_back() {
+    let mut data = envelope(PREVIEW);
+    let base = TradePreview::from_json(&data).unwrap();
+    assert!(base.trail_type.is_empty() && base.trail_offset.is_none());
+
+    data["result"]["intent"]["trailing_stop"] = serde_json::json!({
+        "trail_type": "percent",
+        "trail_offset": "3",
+        "unit": "%",
+        "execution": "market"
+    });
+    let p = TradePreview::from_json(&data).unwrap();
+    assert_eq!(p.trail_type, "percent");
+    assert!(close(p.trail_offset.unwrap(), 3.0));
+    assert_eq!(p.trail_unit, "%");
+    assert_eq!(p.trail_execution, "market");
 }
 
 /// `device_locked` arrives with exit code 20, the same as a real auth failure,
@@ -859,7 +837,7 @@ fn no_shortcut_can_place_an_order() {
     let order_acts: Vec<Act> = BINDINGS
         .iter()
         .map(|b| b.act)
-        .filter(|a| matches!(a, Act::Preview | Act::CancelOrder | Act::ArmTrail))
+        .filter(|a| matches!(a, Act::Preview | Act::CancelOrder | Act::TrailSelection))
         .collect();
     assert!(order_acts.contains(&Act::Preview));
 
@@ -880,11 +858,6 @@ fn no_shortcut_can_place_an_order() {
 
     // And the omission is documented rather than accidental.
     assert!(UNBOUND.iter().any(|(what, _)| what.contains("Submit")));
-    assert!(
-        UNBOUND
-            .iter()
-            .any(|(what, _)| what.contains("trailing stop"))
-    );
     assert!(UNBOUND.iter().all(|(_, why)| !why.is_empty()));
 }
 

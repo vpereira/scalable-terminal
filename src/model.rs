@@ -843,6 +843,8 @@ pub enum OrderType {
     Market,
     Limit,
     Stop,
+    /// Sell only, EIX and gettex only. The broker moves the stop.
+    TrailingStop,
 }
 
 impl OrderType {
@@ -851,6 +853,38 @@ impl OrderType {
             OrderType::Market => "market",
             OrderType::Limit => "limit",
             OrderType::Stop => "stop",
+            OrderType::TrailingStop => "trailing-stop",
+        }
+    }
+}
+
+/// Trailing stops route to EIX and gettex only. Empty means the broker default.
+pub fn trail_venue_ok(venue: &str) -> bool {
+    let v = venue.trim().to_ascii_lowercase();
+    v.is_empty() || ["gettex", "munc", "eix", "seix"].contains(&v.as_str())
+}
+
+/// Distance of a broker side trailing stop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrailDistance {
+    /// EUR below the high water mark.
+    Amount(f64),
+    /// Percent below the high water mark, 5 meaning 5%.
+    Percent(f64),
+}
+
+impl TrailDistance {
+    /// The broker's floor on a percentage trail.
+    pub const MIN_PERCENT: f64 = 0.5;
+
+    /// Why the broker would refuse this distance, if it would.
+    pub fn problem(self) -> Option<&'static str> {
+        match self {
+            TrailDistance::Amount(a) if a.is_nan() || a <= 0.0 => Some("set a trail amount"),
+            TrailDistance::Percent(p) if !(Self::MIN_PERCENT..100.0).contains(&p) => {
+                Some("trail percent must be between 0.5 and 100")
+            }
+            _ => None,
         }
     }
 }
@@ -880,6 +914,11 @@ pub struct TradePreview {
     pub exit_cost: Option<f64>,
     pub warning_title: String,
     pub warning_body: String,
+    /// The trail as the broker understood it, empty for any other order type.
+    pub trail_type: String,
+    pub trail_offset: Option<f64>,
+    pub trail_unit: String,
+    pub trail_execution: String,
     pub raw: Value,
 }
 
@@ -912,6 +951,11 @@ impl TradePreview {
             exit_cost: f64_at(v, &["result/ex_ante_costs/exitCosts/total/amount"]),
             warning_title: str_at(v, &["result/warning/title"]).unwrap_or_default(),
             warning_body: str_at(v, &["result/warning/body"]).unwrap_or_default(),
+            trail_type: str_at(v, &["result/intent/trailing_stop/trail_type"]).unwrap_or_default(),
+            trail_offset: f64_at(v, &["result/intent/trailing_stop/trail_offset"]),
+            trail_unit: str_at(v, &["result/intent/trailing_stop/unit"]).unwrap_or_default(),
+            trail_execution: str_at(v, &["result/intent/trailing_stop/execution"])
+                .unwrap_or_default(),
             raw: v.clone(),
         })
     }
@@ -1002,95 +1046,6 @@ impl DerivativesPage {
             total_available: f64_at(v, &["total_available"]).unwrap_or(0.0) as u64,
             items,
         }
-    }
-}
-
-/// A client side trailing stop.
-///
-/// `sc` has no trailing order type and no amend command, so a trail can only be
-/// expressed as: watch the price, and when it ratchets, cancel the resting stop
-/// and place a new one higher. Everything except the high water mark is derived
-/// from live broker state, so an order cancelled or moved elsewhere is picked up
-/// rather than silently disagreed with.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Trail {
-    pub isin: String,
-    /// Fraction below the high water mark when `percent`, else an absolute price.
-    pub distance: f64,
-    pub percent: bool,
-    /// Best mid seen since the trail was armed. Never decreases.
-    pub high_water: f64,
-    /// Smallest improvement worth a replacement, as a fraction of price.
-    /// Replacing costs three calls and opens an unprotected window, so tiny
-    /// ratchets are not worth taking.
-    pub min_step: f64,
-}
-
-impl Trail {
-    pub const DEFAULT_MIN_STEP: f64 = 0.001;
-
-    pub fn new(isin: impl Into<String>, distance: f64, percent: bool, mid: f64) -> Self {
-        Trail {
-            isin: isin.into(),
-            distance,
-            percent,
-            high_water: mid,
-            min_step: Self::DEFAULT_MIN_STEP,
-        }
-    }
-
-    /// Feed a new mid. Returns true when the high water mark advanced.
-    pub fn observe(&mut self, mid: f64) -> bool {
-        if mid.is_finite() && mid > self.high_water {
-            self.high_water = mid;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Where the stop should sit given the high water mark.
-    ///
-    /// Rounded down to four decimals, so rounding can only ever place the stop
-    /// further from the market, never closer to triggering. The epsilon matters:
-    /// `190 * 0.97` is `184.29999999999998` in binary floating point, and a bare
-    /// floor would turn that into `184.2999`, throwing away a whole tick every
-    /// time the arithmetic lands a hair under a round number.
-    pub fn suggested_stop(&self) -> Option<f64> {
-        if !self.valid() || self.high_water <= 0.0 {
-            return None;
-        }
-        let raw = if self.percent {
-            self.high_water * (1.0 - self.distance)
-        } else {
-            self.high_water - self.distance
-        };
-        if raw <= 0.0 {
-            return None;
-        }
-        Some((raw * 10_000.0 + 1e-6).floor() / 10_000.0)
-    }
-
-    pub fn valid(&self) -> bool {
-        self.distance > 0.0 && (!self.percent || self.distance < 1.0)
-    }
-
-    /// Whether the resting stop is far enough below the suggestion to be worth
-    /// replacing. A trail never moves a stop down.
-    pub fn should_move(&self, current_stop: Option<f64>) -> bool {
-        let Some(sug) = self.suggested_stop() else {
-            return false;
-        };
-        match current_stop {
-            None => true,
-            Some(cur) => sug - cur >= (sug * self.min_step).max(1e-6),
-        }
-    }
-
-    /// How far the current price sits above the stop, as a fraction.
-    pub fn cushion(&self, mid: f64, current_stop: Option<f64>) -> Option<f64> {
-        let stop = current_stop.or_else(|| self.suggested_stop())?;
-        (mid > 0.0 && stop > 0.0).then(|| (mid - stop) / mid)
     }
 }
 

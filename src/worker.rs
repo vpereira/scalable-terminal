@@ -78,17 +78,6 @@ pub enum Cmd {
     LoadNews {
         isin: String,
     },
-    ArmTrail {
-        isin: String,
-        distance: f64,
-        percent: bool,
-    },
-    DisarmTrail(String),
-    /// Cancel the resting stop and preview a replacement higher up. Phase two is
-    /// left to the confirm dialog: this never places an order on its own.
-    RatchetTrail {
-        isin: String,
-    },
     Search(String),
     PreviewTrade(TradeIntent),
     SubmitTrade {
@@ -116,11 +105,12 @@ pub struct TradeIntent {
     pub shares: Option<f64>,
     pub limit_price: Option<f64>,
     pub stop_price: Option<f64>,
+    pub trail: Option<TrailDistance>,
     pub venue: Option<String>,
 }
 
 impl TradeIntent {
-    fn argv(&self, confirm: Option<&str>, accept_unsuitable: bool) -> Vec<String> {
+    pub(crate) fn argv(&self, confirm: Option<&str>, accept_unsuitable: bool) -> Vec<String> {
         let mut a: Vec<String> = vec!["broker".into(), "trade".into(), self.side.cmd().into()];
         a.push("--isin".into());
         a.push(self.isin.clone());
@@ -140,6 +130,17 @@ impl TradeIntent {
         if let Some(p) = self.stop_price {
             a.push("--stop-price".into());
             a.push(fmt_num(p));
+        }
+        match self.trail {
+            Some(TrailDistance::Amount(x)) => {
+                a.push("--trail-amount".into());
+                a.push(fmt_num(x));
+            }
+            Some(TrailDistance::Percent(x)) => {
+                a.push("--trail-percent".into());
+                a.push(fmt_num(x));
+            }
+            None => {}
         }
         if let Some(v) = &self.venue
             && !v.trim().is_empty()
@@ -231,11 +232,6 @@ pub struct Shared {
     pub news_error: Option<String>,
     pub news_loading: bool,
     pub news_cache: HashMap<String, SecurityNews>,
-    pub trails: Vec<Trail>,
-    /// Set while a ratchet has cancelled the old stop but not yet placed the new
-    /// one. The position is unprotected for this whole window.
-    pub trail_gap: Option<String>,
-    pub trail_error: Option<String>,
     pub watchlist_error: Option<String>,
     /// Set when the backend rate-limits us. All polling pauses until it passes.
     pub backoff_until: Option<Instant>,
@@ -262,16 +258,6 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// The stop order currently protecting a position, if any.
-    pub fn resting_stop(&self, isin: &str) -> Option<PendingOrder> {
-        self.orders
-            .iter()
-            .find(|o| {
-                o.isin == isin && o.side.eq_ignore_ascii_case("SELL") && o.stop_price.is_some()
-            })
-            .cloned()
-    }
-
     pub fn backoff_secs_left(&self) -> Option<u64> {
         let until = self.backoff_until?;
         let left = until.saturating_duration_since(Instant::now());
@@ -343,7 +329,6 @@ fn worker_loop(
             .collect();
         s.trade_details.extend(parsed);
         s.rebuild_ledger();
-        s.trails = load_trails();
         let (stats, at) = load_stats();
         s.stats = stats;
         s.stats_at = at;
@@ -521,31 +506,6 @@ fn handle(state: &Arc<Mutex<Shared>>, cmd: Cmd) {
             strategy,
         } => load_derivatives(state, &underlying, &dtype, &strategy),
         Cmd::LoadNews { isin } => load_news(state, &isin),
-        Cmd::ArmTrail {
-            isin,
-            distance,
-            percent,
-        } => {
-            let mut s = state.lock().unwrap();
-            let mid = s.quotes.get(&isin).and_then(|q| q.mid).unwrap_or(0.0);
-            s.trails.retain(|t| t.isin != isin);
-            s.trails
-                .push(Trail::new(isin.clone(), distance, percent, mid));
-            s.trail_error = None;
-            s.push_log("trail.arm", 0, true, format!("{isin} at {mid}"));
-            let trails = s.trails.clone();
-            drop(s);
-            save_trails(&trails);
-        }
-        Cmd::DisarmTrail(isin) => {
-            let mut s = state.lock().unwrap();
-            s.trails.retain(|t| t.isin != isin);
-            s.push_log("trail.disarm", 0, true, isin);
-            let trails = s.trails.clone();
-            drop(s);
-            save_trails(&trails);
-        }
-        Cmd::RatchetTrail { isin } => ratchet_trail(state, &isin),
         Cmd::Search(q) => do_search(state, &q),
         Cmd::PreviewTrade(intent) => do_preview(state, &intent),
         Cmd::SubmitTrade {
@@ -899,13 +859,6 @@ fn refresh_account(state: &Arc<Mutex<Shared>>) {
             e.to_string(),
         ),
     }
-    // A stop is resting again, so the unprotected window is over.
-    if let Some(isin) = s.trail_gap.clone()
-        && s.resting_stop(&isin).is_some()
-    {
-        s.trail_gap = None;
-        s.push_log("trail.gap", 0, true, format!("{isin} protected again"));
-    }
     match &an.data {
         Ok(v) => {
             s.analytics = Analytics::from_json(sc::result(v));
@@ -1079,32 +1032,6 @@ fn refresh_quotes(state: &Arc<Mutex<Shared>>, isins: &[String]) {
             }
         }
     }
-    // Advance the high water marks from the prices we just fetched.
-    let mut advanced = false;
-    let marks: Vec<(String, f64)> = s
-        .trails
-        .iter()
-        .filter_map(|t| {
-            s.quotes
-                .get(&t.isin)
-                .and_then(|q| q.mid)
-                .map(|m| (t.isin.clone(), m))
-        })
-        .collect();
-    for (isin, mid) in marks {
-        if let Some(t) = s.trails.iter_mut().find(|t| t.isin == isin) {
-            advanced |= t.observe(mid);
-        }
-    }
-    if advanced {
-        let trails = s.trails.clone();
-        s.push_log("trail.mark", 0, true, "high water advanced");
-        let snapshot = trails;
-        drop(s);
-        save_trails(&snapshot);
-        s = state.lock().unwrap();
-    }
-
     let calls = collected.len();
     let avg = total_ms as f64 / calls.max(1) as f64;
     s.quote_ms_avg = avg;
@@ -1351,142 +1278,6 @@ pub fn load_stats() -> StatsSnapshot {
         }
     }
     (stats, at)
-}
-
-fn trails_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::PathBuf::from(home).join(".config/scalable-terminal/trails.json")
-}
-
-/// Persist trails. Everything else about a trail is re-derived from broker state,
-/// but the high water mark is local memory: lose it and the stop silently loosens
-/// back to the current price on restart.
-fn save_trails(trails: &[Trail]) {
-    let rows: Vec<Value> = trails
-        .iter()
-        .map(|t| {
-            serde_json::json!({
-                "isin": t.isin,
-                "distance": t.distance,
-                "percent": t.percent,
-                "high_water": t.high_water,
-            })
-        })
-        .collect();
-    let path = trails_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(
-        path,
-        serde_json::to_string_pretty(&rows).unwrap_or_default(),
-    );
-}
-
-pub fn load_trails() -> Vec<Trail> {
-    let Ok(txt) = std::fs::read_to_string(trails_path()) else {
-        return Vec::new();
-    };
-    let Ok(rows) = serde_json::from_str::<Vec<Value>>(&txt) else {
-        return Vec::new();
-    };
-    rows.iter()
-        .filter_map(|r| {
-            let isin = sc::str_at(r, &["isin"])?;
-            let distance = sc::f64_at(r, &["distance"])?;
-            let percent = r.get("percent").and_then(Value::as_bool).unwrap_or(true);
-            let high_water = sc::f64_at(r, &["high_water"]).unwrap_or(0.0);
-            let mut t = Trail::new(isin, distance, percent, 0.0);
-            t.high_water = high_water;
-            t.valid().then_some(t)
-        })
-        .collect()
-}
-
-/// Move a trailing stop up one step.
-///
-/// The old order has to die before the replacement can even be previewed: the
-/// shares are committed to it, so a preview of the same size would be refused.
-/// That ordering is forced by the broker, and it means the position is
-/// unprotected from the cancel until the user confirms the new order. The gap is
-/// recorded in `trail_gap` so the interface can say so loudly.
-///
-/// This deliberately stops at phase one. Placing the replacement is the user's
-/// explicit act, through the same confirm dialog as any other order.
-fn ratchet_trail(state: &Arc<Mutex<Shared>>, isin: &str) {
-    let plan = {
-        let s = state.lock().unwrap();
-        let Some(trail) = s.trails.iter().find(|t| t.isin == isin).cloned() else {
-            return;
-        };
-        let Some(stop) = trail.suggested_stop() else {
-            return;
-        };
-        let resting = s.resting_stop(isin);
-        let shares = resting
-            .as_ref()
-            .and_then(|o| o.quantity)
-            .or_else(|| {
-                s.holdings
-                    .iter()
-                    .find(|h| h.isin == isin)
-                    .map(|h| h.quantity)
-            })
-            .unwrap_or(0.0);
-        (stop, shares, resting.map(|o| o.id))
-    };
-    let (stop, shares, order_id) = plan;
-    if shares <= 0.0 {
-        let mut s = state.lock().unwrap();
-        s.trail_error = Some(format!("{isin}: no shares to protect"));
-        return;
-    }
-
-    if let Some(id) = order_id {
-        let call = sc::run(&["broker", "trade", "cancel", "--order-id", &id]);
-        let mut s = state.lock().unwrap();
-        match &call.data {
-            Ok(_) => {
-                s.trail_gap = Some(isin.to_string());
-                s.push_log(
-                    "trail.cancel",
-                    call.elapsed.as_millis(),
-                    true,
-                    format!("{isin} {id}"),
-                );
-            }
-            Err(e) => {
-                // The old stop is still resting, so the position stays protected.
-                s.trail_error = Some(format!("could not cancel the resting stop: {e}"));
-                s.push_log(
-                    "trail.cancel",
-                    call.elapsed.as_millis(),
-                    false,
-                    e.to_string(),
-                );
-                return;
-            }
-        }
-    }
-
-    let intent = TradeIntent {
-        isin: isin.to_string(),
-        side: Side::Sell,
-        order_type: OrderType::Stop,
-        amount: None,
-        shares: Some(shares),
-        limit_price: None,
-        stop_price: Some(stop),
-        venue: None,
-    };
-    do_preview(state, &intent);
-
-    let mut s = state.lock().unwrap();
-    if s.preview.is_none() {
-        s.trail_error = Some(format!(
-            "the stop was cancelled but the replacement preview failed. {isin} is UNPROTECTED.              Place a stop manually or retry."
-        ));
-    }
 }
 
 /// News is cached per instrument and fetched on demand. An instrument with no
